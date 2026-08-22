@@ -5,6 +5,16 @@ namespace Tests.Config;
 [TestFixture]
 public class HydraConfigValidationTests
 {
+    [Test]
+    public void AutoDiscovery_RequiresStrongSharedSecret()
+    {
+        var profiles = new List<HydraConfig>
+        {
+            new() { Mode = Mode.Slave, EmbeddedStyx = new EmbeddedStyxConfig { Server = "auto://studio", Password = "short" } }
+        };
+        Assert.That(() => HydraConfig.Validate(profiles, "client"),
+            Throws.InvalidOperationException.With.Message.Contains("at least 16"));
+    }
     private static string AsFile(string profilesJson) => $$"""{"profiles":{{profilesJson}}}""";
 
     // ─── relay requirement ────────────────────────────────────────────────────

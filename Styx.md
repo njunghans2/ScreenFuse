@@ -157,6 +157,8 @@ Properties an implementer should be aware of:
 | Method | Requires authentication | Returns |
 |---|---|---|
 | `Ping` | no | `true` |
+| `BeginAuthenticate` | no | challenge |
+| `AuthenticateV2` | no | login response |
 | `Authenticate` | no | login response |
 | `GetMyIp` | yes | string |
 | `Send` | yes | nothing |
@@ -165,7 +167,21 @@ Invoking a method that requires authentication before authenticating is fatal: t
 connection without sending a completion record**. A client waiting on that completion waits forever, so
 implementations SHOULD treat connection closure as failure of every outstanding invocation.
 
-### 5.1 `Authenticate(login) → response`
+### 5.1 Challenge authentication
+
+ScreenFuse embedded relays require a fresh connection-bound proof:
+
+1. Call `BeginAuthenticate()` to receive `{ challengeId, nonce, expiresAtUnixMs, allowsLegacy }`.
+2. Compute HMAC-SHA256 with the desk credential over the domain string, challenge id, decoded nonce,
+   authorization token, normalized hostname, and SignalR connection id. Every value is prefixed by its
+   four-byte big-endian length.
+3. Call `AuthenticateV2({ authorization, hostName, challengeId, proof })` before the ten-second expiry.
+
+A challenge is consumed by the first attempt and cannot be replayed on the same or another connection.
+`allowsLegacy` is false for embedded ScreenFuse desks. A separately hosted Styx server may return true for
+backward compatibility, in which case an older client can use the legacy method below.
+
+### 5.2 `Authenticate(login) → response` (legacy)
 
 ```
 login    { "authorization": "<base64 token>", "hostName": "<name>" }
@@ -187,7 +203,7 @@ Authenticating on an already-authenticated connection is permitted and **replace
 connection is thereafter known by the new hostname, the old hostname vanishes from the network, and the
 membership change is broadcast. A client MAY use this to rename itself in place.
 
-### 5.2 `Send(targetHosts, payload)`
+### 5.3 `Send(targetHosts, payload)`
 
 `targetHosts` is an array of hostnames; `payload` is a byte string. The relay resolves each target
 within the sender's network and delivers `Receive` (§6.1) to each resolved connection. There is no
@@ -205,12 +221,12 @@ Delivery semantics:
 - Ordering is preserved between a given pair of peers, being the ordering of a single WebSocket. No
   ordering is implied across different senders.
 
-### 5.3 `Ping() → true`
+### 5.4 `Ping() → true`
 
 Liveness check callable before authentication. Distinct from transport-level ping records, and not
 required for keep-alive.
 
-### 5.4 `GetMyIp() → string`
+### 5.5 `GetMyIp() → string`
 
 Returns the relay's view of the caller's remote address, as a string. Behind a reverse proxy this is the
 forwarded client address. Informational only.
@@ -246,7 +262,7 @@ interleaved with it. Clients that reset per-peer state on departure get re-annou
 do not SHOULD treat the removal as a genuine departure of that peer.
 
 Note the ordering hazard: `Peers` **may arrive before the completion record for the client's own
-`Authenticate` invocation**. Clients MUST register their callbacks before invoking `Authenticate`, or
+authentication invocation**. Clients MUST register their callbacks before authenticating, or
 they will miss the first membership snapshot and any payload a peer sends in reaction to it.
 
 ### 6.3 `Kicked(reason)`

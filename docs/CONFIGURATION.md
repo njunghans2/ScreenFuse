@@ -1,4 +1,4 @@
-# Hydra — Configuration Reference
+# ScreenFuse — Configuration Reference
 
 See the [project README](../README.md) for installation and a quick-start guide.
 
@@ -8,6 +8,7 @@ See the [project README](../README.md) for installation and a quick-start guide.
 - [Config file location](#config-file-location)
 - [Config fields](#config-fields)
 - [Screen layout](#screen-layout)
+- [Desk scenes and display routing](#desk-scenes-and-display-routing)
 - [Dead corners](#dead-corners)
 - [Multi-monitor](#multi-monitor)
 - [Screen definitions](#screen-definitions)
@@ -31,10 +32,12 @@ See the [project README](../README.md) for installation and a quick-start guide.
 
 ## Config file location
 
-The config file is `hydra.conf`, located next to the binary. Set the `CONFIG` environment variable to use a different path:
+The preferred config file is `screenfuse.conf`, located next to the binary (`hydra.conf` remains a compatibility fallback). A packaged macOS app uses `~/Library/Application Support/ScreenFuse/screenfuse.conf` so settings remain writable when the app is installed in `/Applications`. Set the `CONFIG` environment variable to use a different path:
+
+`screenfuse --setup` opens the native tray settings window; it validates and atomically saves `screenfuse.conf`, then relaunches ScreenFuse normally. A missing or invalid configuration opens the same native first-run window automatically. Named scenes are selected from the master computer's tray menu.
 
 ```bash
-CONFIG=/path/to/hydra.conf ./hydra
+CONFIG=/path/to/screenfuse.conf ./screenfuse
 ```
 
 ## Config fields
@@ -45,7 +48,8 @@ CONFIG=/path/to/hydra.conf ./hydra
 - `logLevel` — `trce`, `dbug`, `info`, `warn`, `fail`, or `crit`
 - `logFile` — path to a file where log output is also written (in addition to the console); relative paths are resolved from the config file's directory (default: none)
 - `logTruncate` — if `true`, truncate `logFile` to 0 bytes on each startup so it doesn't grow unbounded (default: `false`)
-- `autoUpdate` — `false` to disable automatic updates
+- `autoUpdate` — reserved compatibility field; official builds currently require explicit package updates (default: `false`)
+- `controlPort` — loopback scene-control page/API port (default: `24801`)
 - `lockFile` — path to a lock file to prevent multiple instances (default: none)
 - `profiles` — array of profile objects (see below); at least one required
 
@@ -54,8 +58,8 @@ CONFIG=/path/to/hydra.conf ./hydra
 - `profileName` — name for this profile, logged at startup so you know which one is active (no duplicates allowed)
 - `mode` — `Master` or `Slave`
 - `networkConfig` — base64 relay config string from the Styx web UI; use this to connect to a standalone Styx server
-- `embeddedStyx` — connect to a Styx server using plain-text credentials: `{ "server": "http://<host>:<port>", "password": "<password>" }` — a more readable alternative to copying the base64 `networkConfig` blob
-- `embeddedStyxServer` — run a Styx relay server embedded inside this Hydra process: `{ "port": <port>, "password": "<password>" }` — useful for home setups where you don't want a separate Styx container; the machine running this automatically connects to its own server, and other machines connect to it using `embeddedStyx`
+- `embeddedStyx` — connect using `{ "server": "auto://<desk-name>", "password": "<password>" }` for zero-address-config LAN discovery, or an explicit `http://<host>:<port>` URL
+- `embeddedStyxServer` — run a relay in this process: `{ "port": 5000, "password": "<password>", "discoveryName": "studio" }`; `discoveryName` enables link-local advertisements for matching `auto://studio` clients
 - `hosts` — list of host entries for the neighbour graph (master only; slaves don't need this)
 - `screenDefinitions` — per-screen scale config (slave only; reported to master via ScreenInfo)
 - `mouseScale` — fallback cursor speed multiplier for all screens on this slave (slave only)
@@ -63,9 +67,32 @@ CONFIG=/path/to/hydra.conf ./hydra
 - `remoteOnly` — `true` to forward all input to remote machines immediately at startup, with no local screen involved (see [Remote-only mode](#remote-only-mode))
 - `syncScreensaver` — `false` to disable screensaver synchronisation (default: `true`)
 - `conditions` — optional object; if set, this profile only activates when **all** specified conditions are met (see [Network-aware config](#network-aware-config))
+- `displayRouting` — physical-monitor input and sleep/wake commands for this named scene
   - `ssid` — activates when connected to this WiFi network name (case-insensitive)
   - `screenCount` — activates when exactly this many screens are connected (integer ≥ 1)
   - `isPluggedIn` — `true` activates when on AC power; `false` activates when on battery
+
+## Desk scenes and display routing
+
+Multiple named profiles without `conditions` are selectable desk scenes. Use the local master control page (`screenfuse --setup`) or CLI (`screenfuse --scene "Scene name"`) to activate one. ScreenFuse refuses a manual switch until every host configured in the current topology is connected, broadcasts the selection, persists it, and restarts each agent into the matching local profile.
+
+Each computer defines the same scene names but its own `mode`, topology, and local monitor commands. Run `screenfuse --doctor` on each computer to discover available monitor IDs and helper status.
+
+```json
+"displayRouting": {
+  "inputs": [
+    { "id": "DELL U2720Q", "input": 17 }
+  ],
+  "wakeDisplays": false,
+  "sleepDisplays": false,
+  "settleDelayMs": 700
+}
+```
+
+- `inputs` sends MCCS VCP `0x60` to matching physical monitors. Use `*` for the default/first monitor.
+- `wakeDisplays` or `sleepDisplays` controls all displays on that computer as an auto-input-detection fallback; they are mutually exclusive.
+- `settleDelayMs` waits after routing before the coordinated restart (`0`–`10000`).
+- Windows IDs are physical description substrings or logical display names; Linux IDs are ddcutil display numbers or `bus:N`; macOS IDs are m1ddc indexes/UUIDs.
 
 ## Screen layout
 
@@ -200,11 +227,11 @@ Each profile has a `profileName` — logged at startup so you always know which 
 - `conditions: { "screenCount": 2 }` — activates when exactly 2 screens are connected
 - `conditions: { "isPluggedIn": true }` — activates when on AC power; `false` for battery-only
 - Conditions are **AND-ed** — `{ "ssid": "Office", "screenCount": 2 }` requires both to match simultaneously
-- No `conditions` (or `{}`) — fallback, activates when no other profile matches
+- No `conditions` (or `{}`) — a named manual scene; if several exist, the first is the initial scene until a selection is persisted
 
-A fallback profile is optional. Without one, Hydra idles when no profile matches — e.g. at a coffee shop.
+A fallback profile is optional. Without one, ScreenFuse idles when no profile matches — e.g. at a coffee shop.
 
-Rules: at most one fallback, no two profiles with identical condition tuples, no duplicate profile names — validated at startup.
+Rules: multiple unconditional profiles are allowed when all have unique names (manual scenes); at most one unnamed fallback is allowed; no two profiles may have identical condition tuples or duplicate names.
 
 Hydra re-evaluates conditions automatically when the network changes, screens are connected/disconnected, or the power source changes, and restarts with the appropriate profile if needed.
 

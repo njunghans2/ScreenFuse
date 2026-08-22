@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <!-- Repository-level QA/publish output must never be picked up by SDK source globs. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);**/artifacts/**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>

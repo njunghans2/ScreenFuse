@@ -4,7 +4,7 @@ const LOG_LEVELS: LogLevel[] = ['trace', 'debug', 'info', 'warn', 'error', 'crit
 
 interface Props {
   state: FormState
-  onChange: (patch: Partial<Pick<FormState, 'name' | 'autoUpdate' | 'logLevel' | 'lockFile' | 'logFile' | 'sessionLogFile'>>) => void
+  onChange: (patch: Partial<Pick<FormState, 'name' | 'autoUpdate' | 'logLevel' | 'lockFile' | 'logFile' | 'sessionLogFile' | 'controlPort'>>) => void
 }
 
 export function RootSettings({ state, onChange }: Props) {
@@ -21,6 +21,12 @@ export function RootSettings({ state, onChange }: Props) {
             placeholder="hostname (optional)"
             onChange={e => onChange({ name: e.target.value || undefined })}
           />
+        </div>
+        <div className="field">
+          <label htmlFor="gs-controlport">Control Port</label>
+          <input id="gs-controlport" type="number" min={1024} max={65535}
+            value={state.controlPort ?? 24801}
+            onChange={e => onChange({ controlPort: Number(e.target.value) })} />
         </div>
         <div className="field">
           <label htmlFor="gs-loglevel">Log Level</label>
@@ -69,8 +75,8 @@ export function RootSettings({ state, onChange }: Props) {
         <label className="checkbox-label">
           <input
             type="checkbox"
-            checked={state.autoUpdate !== false}
-            onChange={e => onChange({ autoUpdate: e.target.checked ? undefined : false })}
+            checked={state.autoUpdate === true}
+            onChange={e => onChange({ autoUpdate: e.target.checked ? true : undefined })}
           />
           Auto Update
         </label>

@@ -1,4 +1,4 @@
-name: Build Hydra
+name: Build ScreenFuse
 
 on:
   push:
@@ -29,8 +29,12 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" == "push" ]; then
             latest=$(gh release list --limit 1 --json tagName --jq '.[0].tagName // empty')
-            patch=$(echo "$latest" | sed 's/^v\?0\.1\.//')
-            echo "version=0.1.$((patch + 1))" >> "$GITHUB_OUTPUT"
+            version=${latest#v}
+            if [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "version=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))" >> "$GITHUB_OUTPUT"
+            else
+              echo "version=0.1.0" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "version=0.1.0" >> "$GITHUB_OUTPUT"
           fi
@@ -73,13 +77,23 @@ jobs:
       - name: Test
         run: dotnet test Hydra.sln --no-restore
 
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet restore Hydra.sln
+      - run: dotnet test Hydra.sln --no-restore
+
   build:
     runs-on: macos-latest
     needs: [version]
 
     strategy:
       matrix:
-        rid: [osx-arm64, win-x64, linux-x64, linux-arm64]
+        rid: [osx-arm64, osx-x64, win-x64, linux-x64, linux-arm64]
 
     steps:
       - uses: actions/checkout@v7
@@ -89,26 +103,52 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      - name: Publish Hydra (${{ matrix.rid }})
+      - name: Publish ScreenFuse (${{ matrix.rid }})
         run: dotnet publish Hydra --runtime ${{ matrix.rid }} --self-contained -p:Version=${{ needs.version.outputs.version }}
+
+      - name: Bundle macOS DDC helper
+        if: matrix.rid == 'osx-arm64'
+        run: |
+          git init /tmp/m1ddc
+          git -C /tmp/m1ddc remote add origin https://github.com/waydabber/m1ddc.git
+          git -C /tmp/m1ddc fetch --depth 1 origin 04d949794102eb8df01ad3681afff6464a3eede2
+          git -C /tmp/m1ddc checkout --detach FETCH_HEAD
+          make -C /tmp/m1ddc
+          cp /tmp/m1ddc/m1ddc Hydra/bin/Release/net10.0/${{ matrix.rid }}/publish/m1ddc
 
       - name: Package artifact
         run: |
-          cd Hydra/bin/Release/net10.0/${{ matrix.rid }}/publish
-          tar czf ${{ github.workspace }}/hydra-${{ matrix.rid }}.tar.gz --exclude='*.pdb' .
-          if [[ "${{ matrix.rid }}" == win-* ]]; then
-            zip -r ${{ github.workspace }}/hydra-${{ matrix.rid }}.zip . -x '*.pdb'
+          publish=${{ github.workspace }}/Hydra/bin/Release/net10.0/${{ matrix.rid }}/publish
+          if [[ "${{ matrix.rid }}" == osx-* ]]; then
+            app=${{ github.workspace }}/ScreenFuse.app
+            mkdir -p "$app/Contents/MacOS"
+            cp -R "$publish"/. "$app/Contents/MacOS/"
+            cp packaging/macos/Info.plist "$app/Contents/Info.plist"
+            plutil -replace CFBundleShortVersionString -string "${{ needs.version.outputs.version }}" "$app/Contents/Info.plist"
+            plutil -replace CFBundleVersion -string "${{ needs.version.outputs.version }}" "$app/Contents/Info.plist"
+            chmod +x "$app/Contents/MacOS/screenfuse"
+            codesign --force --deep --sign - "$app"
+            cd "${{ github.workspace }}"
+            tar czf screenfuse-${{ matrix.rid }}.tar.gz ScreenFuse.app
+          else
+            cd "$publish"
+            tar czf ${{ github.workspace }}/screenfuse-${{ matrix.rid }}.tar.gz --exclude='*.pdb' .
           fi
+          if [[ "${{ matrix.rid }}" == win-* ]]; then
+            zip -r ${{ github.workspace }}/screenfuse-${{ matrix.rid }}.zip . -x '*.pdb'
+          fi
+          cd ${{ github.workspace }}
+          for archive in screenfuse-${{ matrix.rid }}.*; do shasum -a 256 "$archive" > "$archive.sha256"; done
 
       - name: Upload artifact
         if: github.event_name == 'push'
         uses: actions/upload-artifact@v7
         with:
-          name: hydra-${{ matrix.rid }}
-          path: hydra-${{ matrix.rid }}.*
+          name: screenfuse-${{ matrix.rid }}
+          path: screenfuse-${{ matrix.rid }}.*
 
   release:
-    needs: [build, test-linux, test-windows, version]
+    needs: [build, test-linux, test-windows, test-macos, version]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -123,13 +163,15 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release create "v${{ needs.version.outputs.version }}" \
-            --title "Hydra ${{ needs.version.outputs.version }}" \
+            --title "ScreenFuse ${{ needs.version.outputs.version }}" \
             --generate-notes \
-            hydra-osx-arm64/hydra-osx-arm64.tar.gz \
-            hydra-win-x64/hydra-win-x64.tar.gz \
-            hydra-win-x64/hydra-win-x64.zip \
-            hydra-linux-x64/hydra-linux-x64.tar.gz \
-            hydra-linux-arm64/hydra-linux-arm64.tar.gz
+            screenfuse-osx-arm64/screenfuse-osx-arm64.tar.gz \
+            screenfuse-osx-x64/screenfuse-osx-x64.tar.gz \
+            screenfuse-win-x64/screenfuse-win-x64.tar.gz \
+            screenfuse-win-x64/screenfuse-win-x64.zip \
+            screenfuse-linux-x64/screenfuse-linux-x64.tar.gz \
+            screenfuse-linux-arm64/screenfuse-linux-arm64.tar.gz \
+            screenfuse-*/*.sha256
 
       - name: Prune old releases (keep last 5)
         env:

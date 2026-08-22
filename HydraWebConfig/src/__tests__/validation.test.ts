@@ -31,10 +31,9 @@ describe('validate', () => {
     expect(errors.some(e => e.message.includes('duplicate profile name'))).toBe(true)
   })
 
-  it('errors when multiple unconditional profiles', () => {
+  it('allows multiple named unconditional scene profiles', () => {
     const profiles: HydraProfile[] = [p({ profileName: 'A' }), p({ profileName: 'B', mode: 'Slave' })]
-    const errors = validate(profiles)
-    expect(errors.some(e => e.message.includes('unconditional'))).toBe(true)
+    expect(validate(profiles)).toHaveLength(0)
   })
 
   it('passes when only one unconditional profile', () => {
@@ -43,6 +42,14 @@ describe('validate', () => {
       p({ profileName: 'B', mode: 'Slave' }),
     ]
     expect(validate(profiles)).toHaveLength(0)
+  })
+
+  it('validates LAN relay URL, port, and shared secret', () => {
+    const joinErrors = validate([p({ networkType: 'embeddedStyx', embeddedStyx: { server: 'auto://studio', password: 'short' } })])
+    expect(joinErrors.some(e => e.message.includes('16 characters'))).toBe(true)
+    const hostErrors = validate([p({ networkType: 'embeddedStyxServer', embeddedStyxServer: { port: 80, password: 'short' } })])
+    expect(hostErrors.some(e => e.message.includes('between 1024'))).toBe(true)
+    expect(hostErrors.some(e => e.message.includes('16 characters'))).toBe(true)
   })
 
   it('errors on duplicate condition tuples', () => {

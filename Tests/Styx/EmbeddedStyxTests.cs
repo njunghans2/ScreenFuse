@@ -1,5 +1,6 @@
 using Hydra.Config;
 using Hydra.Relay;
+using Common.DTO;
 using System.Net;
 using System.Net.Sockets;
 using Tests.Setup;
@@ -77,6 +78,38 @@ public class EmbeddedStyxTests
         Exception? ex = null;
         try { await client.WaitForReady(1500); } catch (TimeoutException e) { ex = e; }
         Assert.That(ex, Is.InstanceOf<TimeoutException>());
+    }
+
+    [Test]
+    public async Task Auth_RequiresFreshConnectionBoundChallengeProof()
+    {
+        var network = Common.NetworkConfig.Parse(await Blob());
+        await using var client = new TestStyxClient();
+        await client.ConnectRaw($"{_serverUrl}/relay");
+
+        var legacy = await client.Server!.Authenticate(new RelayLogin
+        {
+            Authorization = network.Authorization,
+            HostName = "test-host",
+        });
+        Assert.That(legacy.Authenticated, Is.False, "embedded desks must reject replayable legacy bearer login");
+
+        var challenge = await client.Server.BeginAuthenticate();
+        var login = new RelayLoginV2
+        {
+            Authorization = network.Authorization,
+            HostName = "test-host",
+            ChallengeId = challenge.ChallengeId,
+            Proof = RelayAuthProof.Compute(TestPassword, challenge, network.Authorization, "test-host", client.ConnectionId!),
+        };
+        var accepted = await client.Server.AuthenticateV2(login);
+        var replayed = await client.Server.AuthenticateV2(login);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(accepted.Authenticated, Is.True);
+            Assert.That(replayed.Authenticated, Is.False, "a challenge must be consumed exactly once");
+        }
     }
 
     // ─── messaging ───────────────────────────────────────────────────────────

@@ -29,6 +29,7 @@ public class EmbeddedStyxServerConfig
 {
     public required int Port { get; init; }
     public required string Password { get; init; }
+    public string? DiscoveryName { get; init; }
 }
 
 // connection config for connecting to an embedded Styx server (local or remote)
@@ -45,6 +46,27 @@ public class ScreenDefinition
     public string? PlatformId { get; init; }   // matches DetectedScreen.PlatformId
     public decimal? MouseScale { get; init; }          // cursor speed multiplier for this screen; overrides root mouseScale
     public decimal? RelativeMouseScale { get; init; }  // relative-mode speed multiplier; overrides root relativeMouseScale
+}
+
+// A DDC/CI input command for one physical monitor. Id is platform-specific:
+// Windows: physical monitor description (substring) or logical display name (for example \\.\DISPLAY1)
+// Linux: ddcutil display number ("1") or bus ("bus:6")
+// macOS: m1ddc display number/UUID. "*" selects the first/default display.
+public class MonitorInputConfig
+{
+    public string Id { get; init; } = "*";
+    public required int Input { get; init; }
+}
+
+// Commands applied locally before all agents restart into this profile/scene.
+// DDC input routing is per-monitor; sleep/wake is an all-display fallback for monitors
+// whose automatic input detection is more reliable than VCP 0x60.
+public class DisplayRoutingConfig
+{
+    public List<MonitorInputConfig> Inputs { get; init; } = [];
+    public bool WakeDisplays { get; init; }
+    public bool SleepDisplays { get; init; }
+    public int SettleDelayMs { get; init; } = 500;
 }
 
 public class HydraConfig
@@ -68,6 +90,9 @@ public class HydraConfig
     public bool ScreenLockPropagation { get; init; } = false;  // master only (Mac/Windows) — propagate machine lock to connected slaves
     public bool AccelerateMouseWheel { get; init; } = true;
     public int? DeadCorners { get; init; }  // pixel dead zone at screen corners; scaled by screen scale; per-host setting overrides this
+
+    // optional physical-display commands for this named scene
+    public DisplayRoutingConfig DisplayRouting { get; init; } = new();
 
     // master only — sent with each keypress so per-master preferences are honoured on shared slaves.
     // true (default): held printable keys repeat via keycode-less unicode insertion on Mac slaves, avoiding
@@ -191,10 +216,11 @@ public class HydraConfig
         if (names != null)
             throw new InvalidOperationException($"hydra.conf has duplicate profile name '{names.Key}'.");
 
-        // empty conditions ({}) is treated as unconditional — count those as defaults too
-        var defaults = profiles.Count(c => c.Conditions == null || c.Conditions.IsEmpty);
-        if (defaults > 1)
-            throw new InvalidOperationException("hydra.conf has multiple default profiles (profiles without a 'conditions' field). Only one is allowed.");
+        // Multiple named unconditional profiles are explicit ScreenFuse scenes. Unnamed
+        // profiles remain limited to one because they cannot be selected unambiguously.
+        var defaults = profiles.Where(c => c.Conditions == null || c.Conditions.IsEmpty).ToList();
+        if (defaults.Count > 1 && defaults.Any(c => string.IsNullOrWhiteSpace(c.ProfileName)))
+            throw new InvalidOperationException("screenfuse.conf has multiple default profiles; every unconditional scene must have a unique profileName.");
 
         foreach (var cfg in profiles.Where(c => c.RemoteOnly))
         {
@@ -224,6 +250,17 @@ public class HydraConfig
         {
             if (cfg.NetworkConfig == null && cfg.EmbeddedStyx == null && cfg.EmbeddedStyxServer == null)
                 throw new InvalidOperationException($"Profile '{cfg.ProfileName ?? "(default)"}' has no relay configured. Add networkConfig, embeddedStyx, or embeddedStyxServer.");
+            if (cfg.EmbeddedStyx?.Server.StartsWith("auto://", StringComparison.OrdinalIgnoreCase) == true &&
+                string.IsNullOrWhiteSpace(cfg.EmbeddedStyx.Server[7..]))
+                throw new InvalidOperationException("embeddedStyx auto discovery requires a desk name, for example auto://studio.");
+            if (cfg.EmbeddedStyx?.Server.StartsWith("auto://", StringComparison.OrdinalIgnoreCase) == true && cfg.EmbeddedStyx.Password.Length < 16)
+                throw new InvalidOperationException("LAN discovery requires an embeddedStyx password of at least 16 characters.");
+            if (cfg.EmbeddedStyxServer is { Port: < 1024 or > 65535 })
+                throw new InvalidOperationException("embeddedStyxServer.port must be between 1024 and 65535.");
+            if (cfg.EmbeddedStyxServer?.DiscoveryName is { Length: > 64 })
+                throw new InvalidOperationException("embeddedStyxServer.discoveryName must be 64 characters or fewer.");
+            if (!string.IsNullOrWhiteSpace(cfg.EmbeddedStyxServer?.DiscoveryName) && cfg.EmbeddedStyxServer!.Password.Length < 16)
+                throw new InvalidOperationException("LAN discovery requires an embeddedStyxServer password of at least 16 characters.");
 
             // no duplicate host names within a profile
             var dupHost = cfg.Hosts
@@ -245,6 +282,19 @@ public class HydraConfig
             {
                 if (def.DisplayName == null && def.OutputName == null && def.PlatformId == null)
                     throw new InvalidOperationException("A screenDefinition entry has no matching criteria (displayName, outputName, platformId are all null) — it can never match any screen.");
+            }
+
+
+            if (cfg.DisplayRouting.WakeDisplays && cfg.DisplayRouting.SleepDisplays)
+                throw new InvalidOperationException($"Profile '{cfg.ProfileName ?? "(default)"}' cannot wake and sleep displays at the same time.");
+            if (cfg.DisplayRouting.SettleDelayMs is < 0 or > 10_000)
+                throw new InvalidOperationException($"Profile '{cfg.ProfileName ?? "(default)"}' displayRouting.settleDelayMs must be between 0 and 10000.");
+            foreach (var input in cfg.DisplayRouting.Inputs)
+            {
+                if (string.IsNullOrWhiteSpace(input.Id))
+                    throw new InvalidOperationException($"Profile '{cfg.ProfileName ?? "(default)"}' has a display input with an empty id.");
+                if (input.Input is < 0 or > 255)
+                    throw new InvalidOperationException($"Profile '{cfg.ProfileName ?? "(default)"}' display input must be between 0 and 255.");
             }
         }
     }

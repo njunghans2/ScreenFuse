@@ -126,19 +126,19 @@ public class HydraConfigTests
     }
 
     [Test]
-    public void Load_AutoUpdate_DefaultsToTrue()
+    public void Load_AutoUpdate_DefaultsToFalse()
     {
         var json = AsFile($$"""[{ "mode": "Slave"{{Relay}} }]""");
         var file = HydraConfigFile.Parse(json, "<test>");
-        Assert.That(file.AutoUpdate, Is.True);
+        Assert.That(file.AutoUpdate, Is.False);
     }
 
     [Test]
-    public void Load_AutoUpdate_CanBeDisabled()
+    public void Load_AutoUpdate_CanBeEnabled()
     {
-        var json = $$"""{"autoUpdate":false,"profiles":[{"mode":"Master"{{Relay}}}]}""";
+        var json = $$"""{"autoUpdate":true,"profiles":[{"mode":"Master"{{Relay}}}]}""";
         var file = HydraConfigFile.Parse(json, "<test>");
-        Assert.That(file.AutoUpdate, Is.False);
+        Assert.That(file.AutoUpdate, Is.True);
     }
 
     [Test]
@@ -334,6 +334,13 @@ public class HydraConfigTests
         var json = AsFile("""[{"mode":"Master"},{"mode":"Slave"}]""");
         Assert.That(() => HydraConfig.ParseAndValidate(json),
             Throws.InvalidOperationException.With.Message.Contains("multiple default"));
+    }
+
+    [Test]
+    public void Validate_AllowsMultipleNamedUnconditionalScenes()
+    {
+        var json = AsFile($$"""[{"profileName":"Laptop","mode":"Master"{{Relay}}},{"profileName":"Desktop","mode":"Slave"{{Relay}}}]""");
+        Assert.That(() => HydraConfig.ParseAndValidate(json), Throws.Nothing);
     }
 
     [Test]

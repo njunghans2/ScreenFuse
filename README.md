@@ -1,165 +1,156 @@
-# Hydra
+# ScreenFuse
 
-**A modern, cross-platform software KVM** — share one keyboard and mouse across Mac, Windows, and Linux by moving the cursor to the edge of the screen. A spiritual successor to Synergy and Barrier, with end to end encryption, support for online relays to bridge networks or VPN connections, and sending key input as pre-resolved Unicode characters to eliminate keyboard layout issues.
+ScreenFuse makes a desk of Windows, macOS, and Linux computers behave like one multi-monitor workspace. The cursor crosses computer boundaries, keyboard input follows it, rich clipboard content is synchronized, files and folders can be transferred, and named **desk scenes** coordinate the physical input selected on shared monitors.
 
-[![License: GPL v2](https://img.shields.io/badge/License-GPL_v2-blue.svg)](LICENSE)
-[![Latest release](https://img.shields.io/github/v/release/PacAnimal/hydra)](https://github.com/PacAnimal/hydra/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/PacAnimal/hydra/total)](https://github.com/PacAnimal/hydra/releases)
-[![Build](https://github.com/PacAnimal/hydra/actions/workflows/build-hydra.yml/badge.svg)](https://github.com/PacAnimal/hydra/actions/workflows/build-hydra.yml)
+It is local-first and GPL-2.0. Input traffic uses Hydra's end-to-end encrypted relay protocol; the scene control API listens on loopback only.
 
-![Hydra — cursor crossing from Windows to macOS](https://raw.githubusercontent.com/PacAnimal/hydra/assets/hero.gif)
+## What works
 
----
+- Seamless mouse and keyboard movement across arbitrary multi-monitor layouts.
+- Windows 10/11, macOS 13+ (Apple Silicon and Intel), and Linux X11 (x64/arm64).
+- Text, HTML, RTF, and image clipboard synchronization.
+- File/folder transfer on Windows and macOS; Linux supports copied file URI lists through `xclip` or `wl-clipboard` and receives transfers into Downloads.
+- Named scenes that switch every agent to the matching topology and coordinate monitor inputs.
+- Native DDC/CI on Windows, bundled `m1ddc` on Apple Silicon macOS releases, and `ddcutil` on Linux.
+- Monitor sleep/wake fallback for displays that auto-select a newly active signal.
+- Native tray menu and settings on Windows, macOS, and supported Linux desktops, with first-run setup, scene switching, peer status, display diagnostics, restart, and startup installation.
+- Auto-start installation: Windows service, macOS LaunchAgent, or Linux graphical autostart/systemd user service.
+- Self-contained release archives; no .NET runtime installation is required.
 
-## Why Hydra?
-
-| Feature | Hydra | Synergy 3 | Deskflow | Input Leap | Barrier |
-|---|---|---|---|---|---|
-| Open source | ✅ GPLv2 | ❌ commercial ($29–39) | ✅ GPLv2 | ✅ GPLv2 | ✅ GPLv2 |
-| macOS / Windows / Linux | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Works across networks / NAT (encrypted relay)** | ✅ | ❌ LAN only | ❌ | ❌ | ❌ |
-| **Network-aware profile switching** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Cross-layout keyboard (types 'å' correctly on a US slave)** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Headless Linux / Raspberry Pi forwarder (no display server)** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Cross-machine file transfer | ✅ macOS + Windows | ✅ Windows + macOS | ❌ | ❌ | ❌ |
-| Clipboard sync (text + images) | ✅ | ✅ | ✅ | partial | partial |
-| Active development (2026) | ✅ | ✅ | ✅ | partial | ❌ |
-
----
-
-## A day in the life
-
-**The commuting laptop.** Walk into the office, dock your laptop, and Hydra activates your Office profile automatically — cursor flows between screens, files copy across with one hotkey. Unplug at 5pm: the dock-detected profile drops. Get home and join the home WiFi: Hydra silently switches to your Home profile, where the same laptop now controls a mini-PC plugged into the TV. At a coffee shop with neither network: Hydra idles silently — there's nothing to connect to.
-
-**The Raspberry Pi as a wireless keyboard.** A headless Pi tucked behind the TV runs Hydra in remote-only mode. Plug any USB keyboard and mouse into it, and they instantly control your Mac across the room — no display server, no Xorg, just evdev and a network cable.
-
-**Typing foreign characters across layouts.** Norwegian master, US slave — type `å` on the master and `å` arrives correctly on the slave, even though the slave's keyboard has no key for it. Hydra resolves characters to Unicode on the master before transmission; dead-key composition (`' + a` → `á`) works the same way. No "force all machines to use the same layout" workarounds needed.
-
-**The shared office screen.** A 98-inch display on the conference room wall runs as a slave. Any of the five people around the table can slide their cursor onto it — whoever gets there first takes control. Put up a diagram, hand off to a colleague, pass it back — no cables, no HDMI switches, no "can you share your screen?" interruptions.
-
-**The VPN problem, solved.** Your work laptop is on the corporate VPN; it can't see your personal machine sitting right next to it on the LAN. Drop a Styx container on a cheap VPS, paste the relay config into both machines' `hydra.conf`, and they connect through the relay as if they were on the same network — end-to-end encrypted, no port forwarding, no changes to the VPN.
-
----
+Important limits: DDC/CI input switching depends on monitor firmware and cabling; Linux pointer capture currently requires X11; cross-machine file “dragging” uses copy/paste transfer rather than moving a live native drag object between operating systems. See [Known limitations](#known-limitations).
 
 ## Install
 
-Run the binary directly to try Hydra out, or use `--install` to set it up as a service / LaunchAgent that auto-starts on login and survives reboots.
+Download and open the ScreenFuse release on both computers. Keep both computers on the same private LAN. No addresses, ports, desk names, secrets, roles, or configuration files are needed.
 
-**macOS (Apple Silicon):**
+1. ScreenFuse finds the other computer automatically.
+2. Check that the same six-digit code appears on both computers.
+3. On the controlling computer, choose whether the other computer is to the right, left, above, or below.
+4. Click **Codes match — connect** on both.
+
+ScreenFuse creates the encrypted desk, configures both computers, enables launch on sign-in, and starts. The OS may show a one-time permission or private-network firewall prompt. The pairing code is deliberately the only confirmation: without a cloud account or a pre-shared secret, that check prevents another device on the LAN from impersonating your computer.
+
+If no configuration exists, the native first-run window opens automatically. You can reopen setup explicitly:
+
+```text
+screenfuse --setup
+```
+
+The tray's **Advanced settings…** window uses guided native controls—there is no JSON editor. It is only needed for extra computers, nonstandard topologies, named scenes, or physical monitor input switching. Existing settings are backed up before each save. Per-user settings live in the platform application-data directory, so ScreenFuse also works when installed under Program Files, `/Applications`, or another read-only location.
+
+Discover the available monitor identifiers and DDC helper status before editing scenes:
+
+```text
+screenfuse --doctor
+```
+
+Launch-on-startup is enabled during normal pairing. It can also be repaired from the tray or with `screenfuse --install`.
+
+On Linux, install the small platform helpers first:
+
 ```bash
-curl -L https://github.com/PacAnimal/hydra/releases/latest/download/hydra-osx-arm64.tar.gz | tar xz
-./hydra             # run directly — good for testing, no install needed
-./hydra --install   # installs as a login item, auto-starts on login
-```
-`--install` registers a LaunchAgent, clears the quarantine flag, and starts Hydra immediately. Grant Accessibility permission when prompted: System Settings → Privacy & Security → Accessibility → enable Hydra. To remove: `./hydra --uninstall`.
-
-**Windows (x64):**
-
-Download [hydra-win-x64.zip](https://github.com/PacAnimal/hydra/releases/latest/download/hydra-win-x64.zip), extract, then run:
-```
-hydra.exe             # run directly — good for testing, no install needed
-hydra.exe --install   # install as a Windows service (auto-start, survives logout)
-```
-A UAC prompt will appear for `--install`. Because Hydra installs as a `LocalSystem` service, it stays active on the Windows login and lock screens — mouse and keyboard control works even before you sign in. To remove: `hydra.exe --uninstall`.
-
-**Linux (x64):**
-```bash
-curl -L https://github.com/PacAnimal/hydra/releases/latest/download/hydra-linux-x64.tar.gz | tar xz
-chmod +x hydra
-./hydra
+sudo apt install ddcutil xclip
 ```
 
-**Linux (arm64 / Raspberry Pi):**
-```bash
-curl -L https://github.com/PacAnimal/hydra/releases/latest/download/hydra-linux-arm64.tar.gz | tar xz
-chmod +x hydra
-./hydra
-```
+`ddcutil` normally needs access to `/dev/i2c-*`; follow your distribution's `i2c` group/udev instructions. `wl-paste` from `wl-clipboard` can replace `xclip` for file clipboard reads, although seamless input still requires an X11 session.
 
-All releases are [self-contained](https://github.com/PacAnimal/hydra/releases) — no .NET runtime installation required.
+On macOS, grant Accessibility when prompted. Direct HDMI, DisplayPort, or USB-C connections are more reliable for DDC than docks. Intel Macs can use the sleep/wake fallback or a separately installed compatible DDC helper.
 
-> **Linux with display:** Requires X11 with XInput2. Wayland is not yet supported.
+## Generated configuration reference
 
-> **Linux headless (no display):** See [Remote-only / Raspberry Pi setup](docs/CONFIGURATION.md#headless-linux-no-display-server).
-
----
-
-## Quickstart
-
-Create `hydra.conf` next to the binary on **each machine**.
-
-**Master** (the machine with the physical keyboard and mouse):
+The tray creates and maintains the configuration automatically. The example below is included for troubleshooting and automation—not as a setup step. Each computer has its own config, scene names match, and the computer with the physical keyboard/mouse stays the master.
 
 ```json
 {
-  "name": "desktop",
-  "profiles": [{
-    "mode": "Master",
-    "embeddedStyxServer": { "port": 5000, "password": "secret" },
-    "hosts": [
-      { "name": "desktop", "neighbours": [{ "direction": "right", "name": "laptop" }] },
-      { "name": "laptop" }
-    ]
-  }]
+  "name": "pc",
+  "controlPort": 24801,
+  "profiles": [
+    {
+      "profileName": "PC focus",
+      "mode": "Master",
+      "embeddedStyxServer": { "port": 5000, "password": "replace-with-a-long-random-secret", "discoveryName": "studio" },
+      "displayRouting": {
+        "inputs": [{ "id": "DELL U2720Q", "input": 15 }],
+        "settleDelayMs": 700
+      },
+      "hosts": [
+        { "name": "pc", "neighbours": [{ "direction": "Right", "name": "mac" }] },
+        { "name": "mac" }
+      ]
+    },
+    {
+      "profileName": "Mac focus",
+      "mode": "Master",
+      "embeddedStyxServer": { "port": 5000, "password": "replace-with-a-long-random-secret", "discoveryName": "studio" },
+      "displayRouting": {
+        "inputs": [{ "id": "DELL U2720Q", "input": 17 }],
+        "settleDelayMs": 700
+      },
+      "hosts": [
+        { "name": "pc", "neighbours": [{ "direction": "Right", "name": "mac" }] },
+        { "name": "mac" }
+      ]
+    }
+  ]
 }
 ```
 
-**Slave** (the machine that receives input):
+`auto://studio` uses link-local UDP multicast/broadcast discovery, so DHCP address changes require no config edits. The beacon contains only the human-readable desk name, host name, and relay port—not the password or encryption material. Pick a distinct desk name on shared office networks; the shared password still authenticates and encrypts the relay session.
 
-```json
-{
-  "name": "laptop",
-  "profiles": [{
-    "mode": "Slave",
-    "embeddedStyx": { "server": "http://192.168.1.10:5000", "password": "secret" }
-  }]
-}
+Common MCCS input values are DisplayPort 1 = `15`, HDMI 1 = `17`, HDMI 2 = `18`, and USB-C = `27`, but monitor firmware can use different values.
+
+Monitor IDs are platform-specific:
+
+- Windows: a substring of the physical monitor description (`DELL U2720Q`), logical name (`\\.\DISPLAY1`), or `*`.
+- Linux: ddcutil display number (`1`), bus (`bus:6`), or `*`.
+- macOS: m1ddc display index/UUID or `*`.
+
+If DDC input selection does not work, use `"wakeDisplays": true` in the gaining machine's scene and `"sleepDisplays": true` in the losing machine's matching scene. Sleep/wake affects all displays on that computer, so DDC is preferable when dedicated monitors must stay on.
+
+The full inherited topology/profile reference is in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
+## Switch scenes
+
+Choose a scene from the ScreenFuse tray menu on the running master. Slave trays show connection state but intentionally leave scene switching to the master.
+
+Or activate a scene from scripts, launchers, Stream Deck, Raycast, or AutoHotkey:
+
+```text
+screenfuse --scene "Mac focus"
 ```
 
-Replace `192.168.1.10` with the master's IP address. Run `./hydra` on both machines. Move the cursor past the right edge of the master's screen — it appears on the slave.
+Scene activation is fail-safe: if configured peers are disconnected, ScreenFuse refuses to switch only the local computer. It applies the target scene's display commands, broadcasts the scene, persists it in `.screenfuse-scene`, then restarts every agent into the new topology.
 
-### Hotkeys
+## Clipboard and files
 
-All hotkeys use **Ctrl+Alt+Super** (Super = ⌘ on macOS, Win key on Windows):
+Clipboard content synchronizes when the cursor enters another computer. File transfer uses:
 
-| Hotkey | Action |
-|--------|--------|
-| `Ctrl+Alt+Super+L` | Toggle cursor lock — pin to current screen, or release to roam freely |
-| `Ctrl+Alt+Super+M` | Toggle relative mouse mode on the current remote screen (useful for games) |
-| `Ctrl+Alt+Super+C` | Copy selected files/folders to Hydra's cross-machine clipboard (macOS, Windows) |
-| `Ctrl+Alt+Super+V` | Paste previously copied files to the current machine |
+- `Ctrl+Alt+Super+C` to copy selected files/folders.
+- `Ctrl+Alt+Super+V` to transfer them to the computer under the cursor.
 
-For cross-network setups (different LANs or over a VPN), see [Networking with Styx](docs/CONFIGURATION.md#networking-with-styx).
+On Linux, first use the file manager's normal Copy command so it publishes `text/uri-list`, then use the ScreenFuse hotkeys. Received files go to Downloads (then Desktop/home as fallbacks). Transfers are streamed as compressed archives with a SHA-256 integrity check; folders and name conflicts are supported.
 
----
+## Build and test
 
-## Config editor
+Requires .NET SDK 10.
 
-The easiest way to set up multi-machine layouts, Styx relay configs, and network-aware profiles is the **[Hydra Config Editor](https://hydra-config.c-net.org/)** — a web UI that lets you visually arrange screens and download a ready-to-use `hydra.conf`.
+```text
+dotnet restore Hydra.sln
+dotnet test Hydra.sln
+dotnet publish Hydra --runtime win-x64 --self-contained
+```
 
----
+GitHub Actions builds self-contained archives for `win-x64`, `osx-arm64`, `osx-x64`, `linux-x64`, and `linux-arm64`.
 
-## Features
+## Known limitations
 
-- Seamless cursor transitions in any direction (left, right, up, down)
-- **Multi-monitor support** — multiple local and remote monitors, auto-detected at startup and on connect/disconnect
-- Flexible layout: L-shaped, grids, or any topology
-- **Range-based neighbours** — split edges to route to different hosts by cursor position
-- **Per-screen scale** — control cursor speed on each remote screen
-- Full keyboard forwarding including dead keys and special characters — resolved on the master using its keyboard layout
-- Mouse button and scroll forwarding
-- **Clipboard sync** — text and images synced automatically when switching machines (all platforms)
-- **File transfer** — cross-machine copy/paste of files and folders via hotkey (macOS and Windows)
-- **Media key forwarding** — volume, playback, brightness keys forwarded to the active machine
-- **Screensaver sync** — activating the screensaver on the master locks all connected slaves
-- **Windows login screen support** — installed as a system service, Hydra stays active on the lock and login screens
-- End-to-end encrypted relay via **Styx** for machines on different networks
-- **Multiple masters per slave** — several machines can share a single slave display; whoever moves their cursor onto it takes control
-- **Remote-only mode** — use a headless Linux machine (e.g. Raspberry Pi) as a dedicated input forwarder with no local screen
+- Linux seamless input uses X11/XInput2. Wayland's compositor security model requires InputCapture/RemoteDesktop portals and compositor support; that backend is not implemented here yet.
+- No software can guarantee DDC/CI input switching on arbitrary monitors. Some monitors ignore VCP `0x60`, some docks block DDC, and some panels answer only on the currently active video link.
+- A live operating-system drag object cannot cross OS kernels. ScreenFuse transfers files/folders and clipboard formats, but uses explicit copy/paste hotkeys rather than pretending a native drag continues across machines.
+- macOS input injection requires Accessibility permission. Windows secure-desktop support requires service installation.
+- Avalonia tray support is confirmed on Windows, macOS, KDE, and Ubuntu GNOME; other Linux desktops need a compatible StatusNotifier/AppIndicator tray host.
+- Scene names and network credentials must match across the participating computers.
 
----
+## Project provenance
 
-## Full documentation
-
-- [Configuration reference](docs/CONFIGURATION.md) — all config fields, screen layout options, network-aware profiles, hotkeys, Styx setup, and building from source
-- [Styx protocol](Styx.md) — the relay's wire protocol, for implementing your own client or server against it
+ScreenFuse is based on [PacAnimal/Hydra](https://github.com/PacAnimal/hydra), whose low-latency cross-platform input, clipboard, file-transfer, topology, and relay implementation made a responsible first release possible. The combined work remains under [GPL-2.0](LICENSE). See [docs/MARKET_RESEARCH.md](docs/MARKET_RESEARCH.md) for the build-vs-adopt evidence and [NOTICE.md](NOTICE.md) for attribution.

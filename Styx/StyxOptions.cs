@@ -1,3 +1,3 @@
 namespace Styx;
 
-public record StyxOptions(bool DebugMessages);
+public record StyxOptions(bool DebugMessages, bool AllowLegacyAuthentication = true);

@@ -21,6 +21,7 @@ public sealed class TestStyxClient : IStyxClient, IAsyncDisposable
     private readonly SemaphoreSlim _kickSignal = new(0);
 
     public IStyxServer? Server { get; private set; }
+    public string? ConnectionId => _hub?.ConnectionId;
     public (string Source, string SourceIp, byte[] Payload)? LastReceived { get; private set; }
     public string? KickReason { get; private set; }
 
@@ -43,6 +44,17 @@ public sealed class TestStyxClient : IStyxClient, IAsyncDisposable
             .AddMessagePackProtocol()
             .Build();
 
+        await _hub.StartAsync();
+        _registration = _hub.Register<IStyxClient>(this);
+        Server = _hub.CreateHubProxy<IStyxServer>();
+    }
+
+    public async Task ConnectRaw(string relayUrl)
+    {
+        _hub = new HubConnectionBuilder()
+            .WithUrl(relayUrl)
+            .AddMessagePackProtocol()
+            .Build();
         await _hub.StartAsync();
         _registration = _hub.Register<IStyxClient>(this);
         Server = _hub.CreateHubProxy<IStyxServer>();

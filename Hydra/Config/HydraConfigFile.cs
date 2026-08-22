@@ -8,7 +8,9 @@ namespace Hydra.Config;
 
 public class HydraConfigFile
 {
-    public bool AutoUpdate { get; init; } = true;
+    // Disabled by default until a ScreenFuse release feed is configured. This prevents
+    // a derived build from replacing itself with an unrelated upstream Hydra binary.
+    public bool AutoUpdate { get; init; } = false;
 
     [JsonConverter(typeof(LogLevelConverter))]
     public LogLevel LogLevel { get; init; } = LogLevel.Information;
@@ -31,6 +33,9 @@ public class HydraConfigFile
     // optional — if set, this profile is always selected regardless of conditions (useful for debugging)
     public string? Profile { get; init; }
 
+    // loopback-only JSON automation API used by `screenfuse --scene NAME`
+    public int ControlPort { get; init; } = 24801;
+
     public bool DebugShield { get; init; } = false;
     public bool DebugMouse { get; init; } = false;
 
@@ -47,19 +52,34 @@ public class HydraConfigFile
     {
         var binaryDir = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
         var path = config.GetStringOrNull("CONFIG")
+            ?? FindConfig(DefaultPath())
+            ?? FindConfig(Path.Combine(binaryDir, "screenfuse.conf"))
             ?? FindConfig(Path.Combine(binaryDir, "hydra.conf"))
+            ?? FindConfig(Path.Combine(Directory.GetCurrentDirectory(), "screenfuse.conf"))
             ?? FindConfig(Path.Combine(Directory.GetCurrentDirectory(), "hydra.conf"))
-            ?? throw new FileNotFoundException("No hydra.conf found. Set CONFIG=/path/to/hydra.conf and try again.");
+            ?? throw new FileNotFoundException("No screenfuse.conf found. Set CONFIG=/path/to/screenfuse.conf and try again.");
 
         var json = File.ReadAllText(path);
         var file = Parse(json, path);
         return (file, path);
     }
 
+    public static string DefaultPath()
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        if (string.IsNullOrWhiteSpace(appData))
+            appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(appData))
+            appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config");
+        return Path.Combine(appData, "ScreenFuse", "screenfuse.conf");
+    }
+
     internal static HydraConfigFile Parse(string json, string path)
     {
         var file = json.FromSaneJson<HydraConfigFile>()
             ?? throw new InvalidOperationException($"Failed to deserialize {path}");
+        if (file.ControlPort is < 1024 or > 65535)
+            throw new InvalidOperationException("controlPort must be between 1024 and 65535.");
         file.Profiles.ForEach(p => HydraConfig.ExpandMirrors(p.Hosts));
         HydraConfig.Validate(file.Profiles, file.Name ?? Environment.MachineName.Split('.')[0], file.Profile);
         return file;

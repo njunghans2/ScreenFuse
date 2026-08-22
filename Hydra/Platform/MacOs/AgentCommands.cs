@@ -8,9 +8,9 @@ namespace Hydra.Platform.MacOs;
 [SupportedOSPlatform("macos")]
 internal static partial class AgentCommands
 {
-    private const string Label = "com.cathedral.hydra";
-    private const string ShieldLabel = "com.cathedral.hydra.shield";
-    private const string PlistFileName = "com.cathedral.hydra.plist";
+    private const string Label = "app.screenfuse.agent";
+    private const string ShieldLabel = "app.screenfuse.shield";
+    private const string PlistFileName = "app.screenfuse.agent.plist";
 
     [LibraryImport("libc")]
     private static partial uint getuid();
@@ -26,14 +26,23 @@ internal static partial class AgentCommands
 
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var agentsDir = Path.Combine(home, "Library", "LaunchAgents");
-        var logDir = Path.Combine(home, "Library", "Logs", "Hydra");
+        var logDir = Path.Combine(home, "Library", "Logs", "ScreenFuse");
         var plistPath = Path.Combine(agentsDir, PlistFileName);
 
         Directory.CreateDirectory(agentsDir);
         Directory.CreateDirectory(logDir);
 
-        RemoveQuarantine(exePath);
-        Codesign(exePath, Label);
+        var appBundle = FindAppBundle(exePath);
+        if (appBundle != null)
+        {
+            RemoveQuarantine(appBundle, recursive: true);
+            Codesign(appBundle, Label, deep: true);
+        }
+        else
+        {
+            RemoveQuarantine(exePath);
+            Codesign(exePath, Label);
+        }
         var shieldPath = Path.Combine(workingDir, "Resources", "MacShield", "hydra-shield.app");
         if (Directory.Exists(shieldPath))
         {
@@ -47,7 +56,7 @@ internal static partial class AgentCommands
         File.WriteAllText(plistPath, GeneratePlist(exePath, workingDir, logDir), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
         RunLaunchctl($"bootstrap {DomainTarget()} \"{plistPath}\"");
-        Console.WriteLine("Hydra agent installed and started.");
+        Console.WriteLine("ScreenFuse agent installed and started.");
     }
 
     internal static void Uninstall()
@@ -57,16 +66,16 @@ internal static partial class AgentCommands
 
         if (!File.Exists(plistPath))
         {
-            Console.WriteLine("Hydra agent is not installed.");
+            Console.WriteLine("ScreenFuse agent is not installed.");
             return;
         }
 
         RunLaunchctl($"bootout {DomainTarget()}/{Label}", tolerateFailure: true);
         File.Delete(plistPath);
-        Console.WriteLine("Hydra agent removed.");
+        Console.WriteLine("ScreenFuse agent removed.");
     }
 
-    internal static void Codesign(string path, string identifier)
+    internal static void Codesign(string path, string identifier, bool deep = false)
     {
         // --requirements sets a permissive designated requirement: any binary with our bundle identifier
         // is trusted, rather than the default which ties the csreq to the specific binary's CDHash.
@@ -79,6 +88,7 @@ internal static partial class AgentCommands
             RedirectStandardError = true,
         };
         psi.ArgumentList.Add("--force");
+        if (deep) psi.ArgumentList.Add("--deep");
         psi.ArgumentList.Add("--sign");
         psi.ArgumentList.Add("-");
         psi.ArgumentList.Add("-i");
@@ -88,6 +98,18 @@ internal static partial class AgentCommands
         psi.ArgumentList.Add(path);
         using var proc = Process.Start(psi);
         proc?.WaitForExit(); // failure is non-fatal
+    }
+
+    private static string? FindAppBundle(string executablePath)
+    {
+        var directory = new DirectoryInfo(Path.GetDirectoryName(executablePath)!);
+        while (directory != null)
+        {
+            if (directory.Name.EndsWith(".app", StringComparison.OrdinalIgnoreCase))
+                return directory.FullName;
+            directory = directory.Parent;
+        }
+        return null;
     }
 
     private static void RemoveQuarantine(string path, bool recursive = false)
@@ -130,8 +152,8 @@ internal static partial class AgentCommands
     {
         var exe = SecurityElement.Escape(exePath);
         var wd = SecurityElement.Escape(workingDir);
-        var stdout = SecurityElement.Escape(Path.Combine(logDir, "hydra.stdout.log"));
-        var stderr = SecurityElement.Escape(Path.Combine(logDir, "hydra.stderr.log"));
+        var stdout = SecurityElement.Escape(Path.Combine(logDir, "screenfuse.stdout.log"));
+        var stderr = SecurityElement.Escape(Path.Combine(logDir, "screenfuse.stderr.log"));
 
         return $"""
             <?xml version="1.0" encoding="UTF-8"?>

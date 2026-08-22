@@ -8,6 +8,7 @@
         <Nullable>enable</Nullable>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <ApplicationManifest>app.manifest</ApplicationManifest>
+        <AssemblyName>screenfuse</AssemblyName>
         <PublishSingleFile>true</PublishSingleFile>
         <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
         <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
@@ -15,11 +16,11 @@
 
     <PropertyGroup>
         <Version>0.0.0</Version>
-        <AssemblyTitle>Hydra</AssemblyTitle>
-        <Product>Hydra</Product>
-        <Company>Cathedral</Company>
-        <Description>Software KVM — seamless mouse and keyboard sharing between screens over a network</Description>
-        <Copyright>Copyright (c) 2026 Cathedral. Licensed under the Apache License, Version 2.0.</Copyright>
+        <AssemblyTitle>ScreenFuse</AssemblyTitle>
+        <Product>ScreenFuse</Product>
+        <Company>ScreenFuse contributors</Company>
+        <Description>Cross-platform software KVM with coordinated physical monitor input routing</Description>
+        <Copyright>Copyright (c) 2026 ScreenFuse contributors. GPL-2.0.</Copyright>
     </PropertyGroup>
 
     <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
@@ -37,6 +38,8 @@
         <PackageReference Include="Microsoft.AspNetCore.SignalR.Protocols.MessagePack" Version="10.0.11" />
         <PackageReference Include="System.Drawing.Common" Version="10.0.11" />
         <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.11" />
+        <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+        <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
         <PackageReference Include="TypedSignalR.Client" Version="3.6.0">
             <PrivateAssets>all</PrivateAssets>
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -50,6 +53,11 @@
     <ItemGroup>
         <ProjectReference Include="../Common/Common.csproj" />
         <ProjectReference Include="../Styx/Styx.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <Content Include="../LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+        <Content Include="../THIRD_PARTY_NOTICES.md" Link="THIRD_PARTY_NOTICES.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     </ItemGroup>
 
     <ItemGroup>
@@ -70,8 +78,9 @@
     <Target Name="CompileMacShield" BeforeTargets="Build;_CopyOutOfDateSourceItemsToOutputDirectory" Inputs="$(MSBuildProjectDirectory)/Resources/MacShield/main.swift;$(MSBuildProjectDirectory)/Resources/MacShield/ShieldInfo.plist" Outputs="$(MSBuildProjectDirectory)/Resources/MacShield/.shield-stamp" Condition="$([MSBuild]::IsOSPlatform('OSX')) And '$(RuntimeIdentifier)' != 'win-x64' And '$(RuntimeIdentifier)' != 'linux-x64' And '$(RuntimeIdentifier)' != 'linux-arm64'">
         <MakeDir Directories="$(MSBuildProjectDirectory)/Resources/MacShield/hydra-shield.app/Contents/MacOS" />
         <Copy SourceFiles="$(MSBuildProjectDirectory)/Resources/MacShield/ShieldInfo.plist" DestinationFiles="$(MSBuildProjectDirectory)/Resources/MacShield/hydra-shield.app/Contents/Info.plist" />
-        <Exec Command="xcrun swiftc -O -framework Network -framework CoreWLAN -framework CoreLocation -o &quot;$(MSBuildProjectDirectory)/Resources/MacShield/hydra-shield.app/Contents/MacOS/hydra-shield&quot; &quot;$(MSBuildProjectDirectory)/Resources/MacShield/main.swift&quot;" />
-        <Exec Command="codesign --force --sign - -i com.cathedral.hydra.shield --requirements &quot;=designated =&gt; identifier com.cathedral.hydra.shield&quot; &quot;$(MSBuildProjectDirectory)/Resources/MacShield/hydra-shield.app&quot;" />
+        <Exec Condition="'$(RuntimeIdentifier)' == 'osx-x64'" Command="xcrun swiftc -O -target x86_64-apple-macos13 -framework Network -framework CoreWLAN -framework CoreLocation -o &quot;$(MSBuildProjectDirectory)/Resources/MacShield/hydra-shield.app/Contents/MacOS/hydra-shield&quot; &quot;$(MSBuildProjectDirectory)/Resources/MacShield/main.swift&quot;" />
+        <Exec Condition="'$(RuntimeIdentifier)' != 'osx-x64'" Command="xcrun swiftc -O -framework Network -framework CoreWLAN -framework CoreLocation -o &quot;$(MSBuildProjectDirectory)/Resources/MacShield/hydra-shield.app/Contents/MacOS/hydra-shield&quot; &quot;$(MSBuildProjectDirectory)/Resources/MacShield/main.swift&quot;" />
+        <Exec Command="codesign --force --sign - -i app.screenfuse.shield --requirements &quot;=designated =&gt; identifier app.screenfuse.shield&quot; &quot;$(MSBuildProjectDirectory)/Resources/MacShield/hydra-shield.app&quot;" />
         <Touch Files="$(MSBuildProjectDirectory)/Resources/MacShield/.shield-stamp" AlwaysCreate="true" />
     </Target>
 

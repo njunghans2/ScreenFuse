@@ -15,7 +15,8 @@ public sealed class CoalescingOutputWrapper : IPlatformOutput
     private bool _pendingAbsolute;
     private int _pendingAbsX, _pendingAbsY;
     private int _pendingRelDx, _pendingRelDy;
-    private readonly BlockingCollection<Action> _actions = [];
+    private bool _moveFlushQueued;
+    private readonly BlockingCollection<Action> _actions = new(new ConcurrentQueue<Action>(), 4096);
     private readonly Thread? _drainThread;
 
     public CoalescingOutputWrapper(IPlatformOutput inner) : this(inner, runDrainThread: true) { }
@@ -34,6 +35,7 @@ public sealed class CoalescingOutputWrapper : IPlatformOutput
 
     public void MoveMouse(int x, int y)
     {
+        var schedule = false;
         lock (_moveLock)
         {
             _pendingAbsolute = true;
@@ -42,27 +44,25 @@ public sealed class CoalescingOutputWrapper : IPlatformOutput
             // absolute overrides any accumulated relative
             _pendingRelDx = 0;
             _pendingRelDy = 0;
+            if (!_moveFlushQueued) { _moveFlushQueued = true; schedule = true; }
         }
-        _actions.TryAdd(FlushMove);
+        if (schedule) _actions.TryAdd(FlushMove);
     }
 
     public void MoveMouseRelative(int dx, int dy)
     {
-        Action? flushPrevAbsolute = null;
+        bool flushAbsolute;
+        lock (_moveLock) flushAbsolute = _pendingAbsolute;
+        if (flushAbsolute) FlushPendingMoveToQueue();
+
+        var schedule = false;
         lock (_moveLock)
         {
-            if (_pendingAbsolute)
-            {
-                // cannot merge relative into an absolute; queue the absolute and start fresh relative
-                var (ax, ay) = (_pendingAbsX, _pendingAbsY);
-                _pendingAbsolute = false;
-                flushPrevAbsolute = () => _inner.MoveMouse(ax, ay);
-            }
             _pendingRelDx += dx;
             _pendingRelDy += dy;
+            if (!_moveFlushQueued) { _moveFlushQueued = true; schedule = true; }
         }
-        if (flushPrevAbsolute != null) _actions.TryAdd(flushPrevAbsolute);
-        _actions.TryAdd(FlushMove);
+        if (schedule) _actions.TryAdd(FlushMove);
     }
 
     public void InjectKey(KeyEventMessage msg)
@@ -92,6 +92,7 @@ public sealed class CoalescingOutputWrapper : IPlatformOutput
         lock (_moveLock)
         {
             abs = _pendingAbsolute;
+            _moveFlushQueued = false;
             if (abs) { x = _pendingAbsX; y = _pendingAbsY; _pendingAbsolute = false; }
             else if (_pendingRelDx != 0 || _pendingRelDy != 0)
             {
@@ -111,6 +112,7 @@ public sealed class CoalescingOutputWrapper : IPlatformOutput
         lock (_moveLock)
         {
             abs = _pendingAbsolute;
+            _moveFlushQueued = false;
             if (abs) { x = _pendingAbsX; y = _pendingAbsY; _pendingAbsolute = false; }
             else if (_pendingRelDx != 0 || _pendingRelDy != 0)
             {
@@ -125,7 +127,14 @@ public sealed class CoalescingOutputWrapper : IPlatformOutput
 
     private void Drain()
     {
-        try { foreach (var action in _actions.GetConsumingEnumerable()) action(); }
+        try
+        {
+            foreach (var action in _actions.GetConsumingEnumerable())
+            {
+                try { action(); }
+                catch (Exception) { /* isolate a native injection failure from the process */ }
+            }
+        }
         catch (InvalidOperationException) { } // thrown by BlockingCollection when CompleteAdding races with enumeration start
     }
 
@@ -144,7 +153,10 @@ public sealed class CoalescingOutputWrapper : IPlatformOutput
         FlushPendingMoveToQueue(); // deliver any final pending move
         _actions.CompleteAdding();
         if (_drainThread != null)
-            _drainThread.Join(1000);
+        {
+            // Never dispose the native output while its worker may still be inside it.
+            if (!_drainThread.Join(TimeSpan.FromSeconds(5))) return;
+        }
         else
             DrainPending(); // manual mode: flush the queue inline so a pending move is still delivered
         _inner.Dispose();

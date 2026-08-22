@@ -53,7 +53,7 @@ public class EmbeddedStyxServer(EmbeddedStyxServerConfig config, ILogger<Embedde
         services.AddDataProtection().PersistKeysToNowhere();
         services.AddStyxSignalR();
 
-        services.AddSingleton(new StyxOptions(false));
+        services.AddSingleton(new StyxOptions(DebugMessages: false, AllowLegacyAuthentication: false));
         services.AddSingleton<IClientRegistry, ClientRegistry>();
         services.AddHostedService<IPeerBroadcaster, PeerBroadcastService>();
         services.AddSingleton<IStyxPasswordProvider>(new InlineStyxPasswordProvider(config.Password));

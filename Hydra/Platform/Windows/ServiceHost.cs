@@ -2,9 +2,9 @@ using System.Runtime.Versioning;
 using Cathedral.Logging;
 using Cathedral.Utils;
 using Hydra.Config;
-using Hydra.Update;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Win32;
 
 namespace Hydra.Platform.Windows;
 
@@ -18,7 +18,16 @@ internal static class ServiceHost
         string configPath;
         try
         {
-            (configFile, configPath) = HydraConfigFile.LoadAll(Env.Config);
+            var installedPath = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\ScreenFuse", "ConfigPath", null) as string;
+            if (!string.IsNullOrWhiteSpace(installedPath) && File.Exists(installedPath))
+            {
+                configPath = Path.GetFullPath(installedPath);
+                configFile = HydraConfigFile.Parse(File.ReadAllText(configPath), configPath);
+            }
+            else
+            {
+                (configFile, configPath) = HydraConfigFile.LoadAll(Env.Config);
+            }
             profiles = configFile.Profiles;
         }
         catch (Exception ex) when (ex is FileNotFoundException or InvalidOperationException)
@@ -33,7 +42,7 @@ internal static class ServiceHost
         var builder = Host.CreateApplicationBuilder(args).DisableEventLog();
         var services = builder.Services;
 
-        services.AddWindowsService(options => options.ServiceName = "Hydra");
+        services.AddWindowsService(options => options.ServiceName = "ScreenFuse");
         services.AddSereneConsoleLogging(c => c.MinLogLevel = profile.LogLevel);
 
         if (configFile.LogFile is { } logFileSetting)
@@ -47,15 +56,7 @@ internal static class ServiceHost
         services.AddSingleton<SessionWatchdog>();
         services.AddHostedService(sp => sp.GetRequiredService<SessionWatchdog>());
         services.AddHostedService<SasService>();
-        services.AddSingleton<SelfUpdater>();
-        services.AddHostedService(sp => sp.GetRequiredService<SelfUpdater>());
-
         var app = builder.Build();
-
-        // wire updater to stop child before swapping binary
-        var watchdog = app.Services.GetRequiredService<SessionWatchdog>();
-        var updater = app.Services.GetRequiredService<SelfUpdater>();
-        updater.StopChild = () => watchdog.StopChildAsync();
 
         app.Run();
     }

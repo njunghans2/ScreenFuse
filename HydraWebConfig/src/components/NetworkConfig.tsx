@@ -26,6 +26,11 @@ export function NetworkConfig({ config, onChange }: Props) {
     onChange({ embeddedStyxServer: { port: 5000, password: '', ...config.embeddedStyxServer, ...patch } })
   }
 
+  function secureSecret() {
+    const bytes = crypto.getRandomValues(new Uint8Array(32))
+    return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')
+  }
+
   return (
     <div className="network-config">
       <div className="network-type-group">
@@ -61,7 +66,7 @@ export function NetworkConfig({ config, onChange }: Props) {
             <input
               type="text"
               value={config.embeddedStyx?.server ?? ''}
-              placeholder="e.g. styx.example.com:8080 or 192.168.1.10"
+              placeholder="auto://studio or http://192.168.1.10:5000"
               onChange={e => patchStyx({ server: e.target.value })}
             />
           </div>
@@ -73,17 +78,28 @@ export function NetworkConfig({ config, onChange }: Props) {
               placeholder="shared relay password"
               onChange={e => patchStyx({ password: e.target.value })}
             />
+            <button type="button" className="btn-secondary" onClick={() => patchStyx({ password: secureSecret() })}>Generate secure secret</button>
           </div>
         </div>
       )}
 
       {type === 'embeddedStyxServer' && (
         <div className="field-row mt-10">
+          <div className="field flex-grow">
+            <label>LAN desk name</label>
+            <input
+              type="text"
+              maxLength={64}
+              value={config.embeddedStyxServer?.discoveryName ?? ''}
+              placeholder="studio (enables auto://studio discovery)"
+              onChange={e => patchStyxServer({ discoveryName: e.target.value || undefined })}
+            />
+          </div>
           <div className="field">
             <label>Port</label>
             <input
               type="number"
-              min="1"
+              min="1024"
               max="65535"
               value={config.embeddedStyxServer?.port ?? 5000}
               onChange={e => patchStyxServer({ port: Number(e.target.value) })}
@@ -97,6 +113,7 @@ export function NetworkConfig({ config, onChange }: Props) {
               placeholder="shared relay password"
               onChange={e => patchStyxServer({ password: e.target.value })}
             />
+            <button type="button" className="btn-secondary" onClick={() => patchStyxServer({ password: secureSecret() })}>Generate secure secret</button>
           </div>
         </div>
       )}

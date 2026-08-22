@@ -20,7 +20,7 @@ internal sealed class SelfUpdater(IHydraProfile profile, ILogger<SelfUpdater> lo
     private static HttpClient CreateHttp()
     {
         var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-        http.DefaultRequestHeaders.UserAgent.TryParseAdd("Hydra"); // set once — GitHub requires a UA
+        http.DefaultRequestHeaders.UserAgent.TryParseAdd("ScreenFuse"); // set once — GitHub requires a UA
         return http;
     }
 
@@ -84,7 +84,7 @@ internal sealed class SelfUpdater(IHydraProfile profile, ILogger<SelfUpdater> lo
             return;
         }
 
-        var assetName = $"hydra-{rid}.tar.gz";
+        var assetName = $"screenfuse-{rid}.tar.gz";
         string? downloadUrl = null;
         foreach (var asset in root.GetProperty("assets").EnumerateArray())
         {
@@ -112,7 +112,7 @@ internal sealed class SelfUpdater(IHydraProfile profile, ILogger<SelfUpdater> lo
         var appDir = Path.GetDirectoryName(exePath)
             ?? throw new InvalidOperationException("cannot determine app directory");
 
-        var exeName = OperatingSystem.IsWindows() ? "Hydra.exe" : "Hydra";
+        var exeName = OperatingSystem.IsWindows() ? "screenfuse.exe" : "screenfuse";
         var tmpPath = Path.Combine(appDir, exeName + ".tmp");
 
         // stream: http → gzip → tar → .tmp file
@@ -147,7 +147,7 @@ internal sealed class SelfUpdater(IHydraProfile profile, ILogger<SelfUpdater> lo
         {
             // Windows can't overwrite a running exe, so rename it aside then move the new one in — two
             // non-atomic steps. Retry the second move to ride out transient AV/indexer locks on the fresh
-            // file; if it still fails, roll the old exe back so the install is never left with NO Hydra.exe.
+            // file; if it still fails, roll the old exe back so the install is never left without ScreenFuse.
             File.Move(exePath, exePath + ".old");
             try
             {
@@ -176,10 +176,10 @@ internal sealed class SelfUpdater(IHydraProfile profile, ILogger<SelfUpdater> lo
 
             if (OperatingSystem.IsMacOS())
             {
-                Platform.MacOs.AgentCommands.Codesign(exePath, "com.cathedral.hydra");
+                Platform.MacOs.AgentCommands.Codesign(exePath, "app.screenfuse.agent");
                 var shieldPath = Path.Combine(appDir, "Resources", "MacShield", "hydra-shield.app");
                 if (Directory.Exists(shieldPath))
-                    Platform.MacOs.AgentCommands.Codesign(shieldPath, "com.cathedral.hydra.shield");
+                    Platform.MacOs.AgentCommands.Codesign(shieldPath, "app.screenfuse.shield");
             }
         }
 
@@ -205,8 +205,8 @@ internal sealed class SelfUpdater(IHydraProfile profile, ILogger<SelfUpdater> lo
             TryDelete(file);
 
         // only clear .old backups once the real binary is present again — never destroy the last
-        // recovery copy while Hydra.exe is missing (e.g. after an interrupted Windows swap)
-        var exeName = OperatingSystem.IsWindows() ? "Hydra.exe" : "Hydra";
+        // recovery copy while ScreenFuse is missing (e.g. after an interrupted Windows swap)
+        var exeName = OperatingSystem.IsWindows() ? "screenfuse.exe" : "screenfuse";
         if (File.Exists(Path.Combine(appDir, exeName)))
             foreach (var file in Directory.EnumerateFiles(appDir, "*.old"))
                 TryDelete(file);
@@ -227,6 +227,7 @@ internal sealed class SelfUpdater(IHydraProfile profile, ILogger<SelfUpdater> lo
     private static string? Rid()
     {
         if (OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64) return "osx-arm64";
+        if (OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.X64) return "osx-x64";
         if (OperatingSystem.IsWindows() && RuntimeInformation.ProcessArchitecture == Architecture.X64) return "win-x64";
         if (OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture == Architecture.X64) return "linux-x64";
         if (OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64) return "linux-arm64";

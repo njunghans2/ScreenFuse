@@ -11,6 +11,7 @@ import { ScreenDefinitions } from './components/ScreenDefinitions'
 import { ConditionsEditor } from './components/ConditionsEditor'
 import { ConfigFileSection } from './components/ConfigFileSection'
 import { CanvasErrorBoundary } from './components/CanvasErrorBoundary'
+import { DisplayRoutingEditor } from './components/DisplayRoutingEditor'
 
 export default function App() {
   const {
@@ -63,7 +64,7 @@ export default function App() {
       <header className="app-header">
         <div className="header-inner">
           <div className="header-title">
-            <h1>Hydra</h1>
+            <h1>ScreenFuse</h1>
             <span className="subtitle">Configuration editor</span>
           </div>
           <div className="header-actions">
@@ -175,6 +176,11 @@ export default function App() {
               </div>
 
               <GlobalSettings config={current} onChange={updateCurrent} />
+
+              <DisplayRoutingEditor
+                routing={current.displayRouting ?? {}}
+                onChange={displayRouting => updateCurrent({ displayRouting })}
+              />
 
               {/* master: screen layout editor */}
               {isMaster && (

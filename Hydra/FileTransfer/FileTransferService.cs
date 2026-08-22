@@ -638,19 +638,18 @@ public sealed class FileTransferService : IDisposable
         long totalSent = 0;
         try
         {
-            relay.Send([targetHost], MessageSerializer.Encode(MessageKind.FileTransferStart, new FileTransferStartMessage(names, totalBytes)));
+            await relay.SendReliableAsync([targetHost], MessageSerializer.Encode(MessageKind.FileTransferStart, new FileTransferStartMessage(names, totalBytes)), cancel);
 
             var sha = await TarGzStreamer.StreamAsync(paths, async (data, seq, uncompressedBytes) =>
             {
                 cancel.ThrowIfCancellationRequested();
-                relay.Send([targetHost], MessageSerializer.Encode(MessageKind.FileTransferChunk, new FileTransferChunkMessage(seq, data)));
+                await relay.SendReliableAsync([targetHost], MessageSerializer.Encode(MessageKind.FileTransferChunk, new FileTransferChunkMessage(seq, data)), cancel);
                 totalSent += data.Length;
                 _dialog.UpdateProgress(uncompressedBytes, CalcSpeed(startTick, totalSent));
                 _log.LogDebug("Sent chunk #{Seq}: {Bytes} bytes", seq, data.Length);
-                await ValueTask.CompletedTask;
             }, _dialog.SetCurrentFile, cancel);
 
-            relay.Send([targetHost], MessageSerializer.Encode(MessageKind.FileTransferDone, new FileTransferDoneMessage(totalSent, sha)));
+            await relay.SendReliableAsync([targetHost], MessageSerializer.Encode(MessageKind.FileTransferDone, new FileTransferDoneMessage(totalSent, sha)), cancel);
             _dialog.ShowCompleted();
             _log.LogInformation("Transfer complete: {Bytes} compressed bytes sent", ByteSize.FromBytes(totalSent));
         }

@@ -18,6 +18,11 @@ internal static partial class ProcessRestart
 
         if (OperatingSystem.IsWindows())
         {
+            // A service-owned session child must not spawn its own replacement; the watchdog
+            // observes this exit and launches exactly one child in the active desktop session.
+            if (RunMode.IsSessionChild)
+                Environment.Exit(0);
+
             // windows has no exec() — start a new process and exit
             var info = new ProcessStartInfo { FileName = exePath, UseShellExecute = false };
             foreach (var arg in Environment.GetCommandLineArgs().Skip(1))

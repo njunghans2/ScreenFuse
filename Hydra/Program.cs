@@ -4,6 +4,8 @@ using Cathedral.Extensions;
 using Cathedral.Logging;
 using Cathedral.Utils;
 using Hydra.Config;
+using Hydra.Display;
+using Hydra.Discovery;
 using Hydra.FileTransfer;
 using Hydra.Platform;
 using Hydra.Platform.Linux;
@@ -11,10 +13,12 @@ using Hydra.Platform.MacOs;
 using Hydra.Platform.Windows;
 using Hydra.Relay;
 using Hydra.Screen;
-using Hydra.Update;
+using Hydra.Scenes;
+using Hydra.Tray;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 // ensure console can display non-ASCII characters (e.g. '€', 'ø') in debug logs
 Console.OutputEncoding = Encoding.UTF8;
@@ -37,12 +41,49 @@ if (args.Contains("--install"))
 {
     if (OperatingSystem.IsWindows()) ServiceCommands.Install();
     else if (OperatingSystem.IsMacOS()) AgentCommands.Install();
+    else if (OperatingSystem.IsLinux()) LinuxServiceCommands.Install();
     return;
 }
 if (args.Contains("--uninstall"))
 {
     if (OperatingSystem.IsWindows()) ServiceCommands.Uninstall();
     else if (OperatingSystem.IsMacOS()) AgentCommands.Uninstall();
+    else if (OperatingSystem.IsLinux()) LinuxServiceCommands.Uninstall();
+    return;
+}
+
+var controlPortArg = ReadIntOption(args, "--port") ?? 24801;
+var defaultConfigPath = Environment.GetEnvironmentVariable("CONFIG")
+    ?? HydraConfigFile.DefaultPath();
+if (args.Contains("--setup"))
+{
+    var setupPath = defaultConfigPath;
+    var needsOnboarding = !File.Exists(setupPath);
+    string? setupError = null;
+    try
+    {
+        (_, setupPath) = HydraConfigFile.LoadAll(Env.Config);
+        needsOnboarding = false;
+    }
+    catch (FileNotFoundException) { }
+    catch (Exception ex) when (ex is IOException or InvalidOperationException or System.Text.Json.JsonException)
+    {
+        needsOnboarding = false;
+        setupError = $"ScreenFuse needs a valid configuration: {ex.Message}";
+    }
+    TrayApplication.Run(null, setupPath, setupOnly: true, initialStatus: setupError, onboarding: needsOnboarding);
+    return;
+}
+if (args.Contains("--doctor"))
+{
+    var report = await new DisplayRouter(NullLogger<DisplayRouter>.Instance).DoctorAsync();
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(report, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+    return;
+}
+var sceneArg = ReadStringOption(args, "--scene");
+if (sceneArg != null)
+{
+    await ActivateSceneFromCli(sceneArg, controlPortArg);
     return;
 }
 
@@ -67,6 +108,16 @@ while (true)
     }
     catch (Exception ex) when (ex is IOException or InvalidOperationException or System.Text.Json.JsonException)
     {
+        var graphicalSession = !OperatingSystem.IsLinux()
+            || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY"));
+        if (graphicalSession)
+        {
+            TrayApplication.Run(null, defaultConfigPath, setupOnly: true,
+                initialStatus: $"ScreenFuse needs a valid configuration: {ex.Message}",
+                onboarding: ex is FileNotFoundException);
+            return;
+        }
+
         // don't hard-exit on a missing/invalid config: under launchd/service KeepAlive that turns into a
         // ~5s relaunch storm that spams the redirect logs forever. Stay alive and retry so a corrected
         // config is picked up automatically. Log the message once (and again only if it changes).
@@ -129,10 +180,23 @@ else
     config = HydraConfig.Resolve(profiles, new ConditionState(activeSsids, screenCount, isPluggedIn));
 }
 
-// derive network config blob from embeddedStyx (explicit) or embeddedStyxServer (auto-localhost)
+var sceneStore = new SceneOverrideStore(configPath);
+var selectedScene = configFile.Profile ?? sceneStore.Read();
+if (selectedScene != null)
+{
+    var selected = profiles.FirstOrDefault(p => p.ProfileName?.Equals(selectedScene, StringComparison.OrdinalIgnoreCase) == true);
+    if (selected != null)
+        config = selected;
+    else if (configFile.Profile == null)
+        Console.Error.WriteLine($"Ignoring stale ScreenFuse scene '{selectedScene}' — no matching profile exists.");
+}
+
+// derive network config blob after the persisted scene override has selected the active profile
 string? embeddedNetworkConfig = null;
 if (config?.EmbeddedStyx != null)
+{
     embeddedNetworkConfig = await NetworkConfig.ComputeEmbeddedBlob(config.EmbeddedStyx.Server, config.EmbeddedStyx.Password);
+}
 else if (config?.EmbeddedStyxServer != null)
     embeddedNetworkConfig = await NetworkConfig.ComputeEmbeddedBlob($"http://localhost:{config.EmbeddedStyxServer.Port}", config.EmbeddedStyxServer.Password);
 
@@ -166,6 +230,8 @@ services.AddSingleton(profiles);
 services.AddSingleton<ICmdRunner, CmdRunner>();
 services.AddSingleton<INetworkDetector>(_ => detector);
 services.AddSingleton<IWorldState, WorldState>();
+services.AddSingleton(sceneStore);
+services.AddSingleton<IDisplayRouter, DisplayRouter>();
 services.AddSingleton<DormancyState>();
 services.AddSingleton<IDormancyState>(sp => sp.GetRequiredService<DormancyState>());
 services.AddHostedService(sp => sp.GetRequiredService<DormancyState>());
@@ -304,14 +370,13 @@ if (config != null)
     else
         services.AddSingleton<IClipboardSync, NullClipboardSync>();
 
-    if (!RunMode.IsSessionChild)
-        services.AddHostedService<SelfUpdater>();
-
     // file selection detector: reads selected files from Finder/Explorer for copy hotkey
     if (OperatingSystem.IsMacOS())
         services.AddSingleton<IFileSelectionDetector, MacFileSelectionDetector>();
     else if (OperatingSystem.IsWindows())
         services.AddSingleton<IFileSelectionDetector, WindowsFileSelectionDetector>();
+    else if (OperatingSystem.IsLinux() && !linuxConsoleMode)
+        services.AddSingleton<IFileSelectionDetector, LinuxFileSelectionDetector>();
     else
         services.AddSingleton<IFileSelectionDetector, NullFileSelectionDetector>();
 
@@ -333,7 +398,10 @@ if (config != null)
     {
         services.AddSingleton<IFileTransferDialog, NullFileTransferDialog>();
         services.AddSingleton<IOsdNotification, NullOsdNotification>();
-        services.AddSingleton<IDropTargetResolver, NullDropTargetResolver>();
+        if (OperatingSystem.IsLinux() && !linuxConsoleMode)
+            services.AddSingleton<IDropTargetResolver, LinuxDropTargetResolver>();
+        else
+            services.AddSingleton<IDropTargetResolver, NullDropTargetResolver>();
     }
     services.AddSingleton<FileTransferService>();
 
@@ -342,6 +410,7 @@ if (config != null)
     {
         services.AddSingleton(config.EmbeddedStyxServer);
         services.AddHostedService<EmbeddedStyxServer>();
+        services.AddHostedService<LanDiscoveryBroadcaster>();
     }
 
     if (profile.Mode == Mode.Slave)
@@ -349,6 +418,13 @@ if (config != null)
     else
         services.AddHostedService<IRelaySender, MasterRelayConnection>();
     services.AddSingleton<IActivityTracker, ActivityTracker>();
+    services.AddSingleton<ISceneCoordinator, SceneCoordinator>();
+    services.AddHostedService(sp => (SceneCoordinator)sp.GetRequiredService<ISceneCoordinator>());
+    if (profile.Mode == Mode.Master && configFile.Profile == null)
+        services.AddHostedService(sp => new SceneControlServer(
+            sp.GetRequiredService<ISceneCoordinator>(),
+            configFile.ControlPort,
+            sp.GetRequiredService<ILogger<SceneControlServer>>()));
 }
 
 if (OperatingSystem.IsWindows() && RunMode.IsSessionChild)
@@ -379,7 +455,14 @@ if (HydraConfig.HasScreenCountConditions(profiles))
     }
 }
 
-app.Run();
+await app.StartAsync();
+using var trayShutdown = app.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.Register(TrayApplication.RequestShutdown);
+var canShowTray = !OperatingSystem.IsLinux() || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY"));
+if (canShowTray)
+    TrayApplication.Run(app.Services, configPath);
+else
+    await app.WaitForShutdownAsync();
+await app.StopAsync();
 processLock?.Dispose();
 
 // creates the platform-specific network detector for use before DI is set up
@@ -412,4 +495,30 @@ static int GetScreenCount()
         }
     }
     return 1;
+}
+
+static string? ReadStringOption(string[] arguments, string name)
+{
+    var index = Array.FindIndex(arguments, a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
+    return index >= 0 && index + 1 < arguments.Length ? arguments[index + 1] : null;
+}
+
+static int? ReadIntOption(string[] arguments, string name) =>
+    int.TryParse(ReadStringOption(arguments, name), out var value) ? value : null;
+
+static async Task ActivateSceneFromCli(string scene, int port)
+{
+    try
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        var response = await client.PostAsync($"http://127.0.0.1:{port}/api/scenes/{Uri.EscapeDataString(scene)}", null);
+        var body = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode) Environment.ExitCode = 1;
+        Console.WriteLine(body);
+    }
+    catch (Exception ex)
+    {
+        Environment.ExitCode = 1;
+        Console.Error.WriteLine($"Could not reach the ScreenFuse master on 127.0.0.1:{port}: {ex.Message}");
+    }
 }

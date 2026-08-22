@@ -27,6 +27,7 @@ public interface IHydraProfile
     bool AccelerateMouseWheel { get; }
     bool UnicodeKeyRepeat { get; }
     int? DeadCorners { get; }
+    DisplayRoutingConfig DisplayRouting { get; }
 
     // computed from Name + Hosts
     HostConfig? LocalHost { get; }
@@ -57,6 +58,7 @@ public class HydraProfile(HydraConfigFile configFile, HydraConfig? activeProfile
     public bool AccelerateMouseWheel => _activeProfile?.AccelerateMouseWheel ?? true;
     public bool UnicodeKeyRepeat => _activeProfile?.UnicodeKeyRepeat ?? true;
     public int? DeadCorners => _activeProfile?.DeadCorners;
+    public DisplayRoutingConfig DisplayRouting => _activeProfile?.DisplayRouting ?? new();
 
     public HostConfig? LocalHost => Hosts.FirstOrDefault(h => h.Name.EqualsIgnoreCase(Name));
     public IEnumerable<HostConfig> RemoteHosts => Hosts.Where(h => !h.Name.EqualsIgnoreCase(Name));

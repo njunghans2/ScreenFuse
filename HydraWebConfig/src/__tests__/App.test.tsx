@@ -10,7 +10,7 @@ describe('App', () => {
 
   it('renders without crashing', () => {
     render(<App />)
-    expect(screen.getByText('Hydra')).toBeInTheDocument()
+    expect(screen.getByText('ScreenFuse')).toBeInTheDocument()
   })
 
   it('shows Master and Slave toggle buttons', () => {

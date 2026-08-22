@@ -108,6 +108,7 @@ function parseEmbeddedStyxServer(obj: Record<string, unknown>): EmbeddedStyxServ
   return {
     port: Number(obj.port ?? 0),
     password: String(obj.password ?? ''),
+    discoveryName: optStr(obj.discoveryName),
   }
 }
 
@@ -146,6 +147,14 @@ function parseProfile(obj: Record<string, unknown>): HydraProfile {
     debugShield: optBool(obj.debugShield),
     deadCorners: optNum(obj.deadCorners),
     conditions: obj.conditions ? parseConditions(obj.conditions as Record<string, unknown>) : undefined,
+    displayRouting: obj.displayRouting ? {
+      inputs: Array.isArray((obj.displayRouting as Record<string, unknown>).inputs)
+        ? ((obj.displayRouting as Record<string, unknown>).inputs as Record<string, unknown>[]).map(i => ({ id: String(i.id ?? '*'), input: Number(i.input ?? 0) }))
+        : undefined,
+      wakeDisplays: strictBool((obj.displayRouting as Record<string, unknown>).wakeDisplays),
+      sleepDisplays: strictBool((obj.displayRouting as Record<string, unknown>).sleepDisplays),
+      settleDelayMs: optNum((obj.displayRouting as Record<string, unknown>).settleDelayMs),
+    } : undefined,
   }
 }
 
@@ -173,6 +182,7 @@ export function deserialize(json: string): FormState {
     lockFile: optStr(root.lockFile),
     logFile: optStr(root.logFile),
     sessionLogFile: optStr(root.sessionLogFile),
+    controlPort: optNum(root.controlPort),
     profiles: root.profiles.map(parseProfile),
     activeIndex: 0,
   }

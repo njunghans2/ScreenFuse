@@ -5,7 +5,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace Hydra.Platform.Windows;
 
-/// <summary>Stops the application when the service watchdog signals HydraSessionStop.</summary>
+/// <summary>Stops the application when the service watchdog signals ScreenFuseSessionStop.</summary>
 [SupportedOSPlatform("windows")]
 internal sealed class SessionChildLifetime(IHostApplicationLifetime lifetime) : IHostedService, IDisposable
 {
@@ -15,7 +15,7 @@ internal sealed class SessionChildLifetime(IHostApplicationLifetime lifetime) : 
 
     public Task StartAsync(CancellationToken cancel)
     {
-        _stopEvent = Win32Session.OpenGlobalEvent("HydraSessionStop");
+        _stopEvent = Win32Session.OpenGlobalEvent("ScreenFuseSessionStop");
         if (_stopEvent == null) return Task.CompletedTask; // running standalone, not under service
 
         _thread = new Thread(WaitForStop) { IsBackground = true, Name = "session-stop-watcher" };

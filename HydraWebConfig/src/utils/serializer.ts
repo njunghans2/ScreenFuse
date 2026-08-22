@@ -50,7 +50,13 @@ function serializeProfile(p: HydraProfile): Record<string, unknown> {
   if (p.networkType === 'embeddedStyx' && p.embeddedStyx?.server && p.embeddedStyx?.password) {
     out.embeddedStyx = { server: p.embeddedStyx.server, password: p.embeddedStyx.password }
   } else if (p.networkType === 'embeddedStyxServer' && p.embeddedStyxServer?.password) {
-    out.embeddedStyxServer = { port: p.embeddedStyxServer.port, password: p.embeddedStyxServer.password }
+    out.embeddedStyxServer = {
+      port: p.embeddedStyxServer.port,
+      password: p.embeddedStyxServer.password,
+      ...(p.embeddedStyxServer.discoveryName?.trim()
+        ? { discoveryName: p.embeddedStyxServer.discoveryName.trim() }
+        : {}),
+    }
   } else if (p.networkConfig?.trim()) {
     out.networkConfig = p.networkConfig.trim()
   }
@@ -90,17 +96,29 @@ function serializeProfile(p: HydraProfile): Record<string, unknown> {
     if (Object.keys(c).length > 0) out.conditions = c
   }
 
+  if (p.displayRouting) {
+    const routing: Record<string, unknown> = {}
+    const inputs = (p.displayRouting.inputs ?? []).filter(i => i.id.trim())
+    if (inputs.length > 0) routing.inputs = inputs.map(i => ({ id: i.id.trim(), input: i.input }))
+    if (p.displayRouting.wakeDisplays) routing.wakeDisplays = true
+    if (p.displayRouting.sleepDisplays) routing.sleepDisplays = true
+    if (p.displayRouting.settleDelayMs !== undefined && p.displayRouting.settleDelayMs !== 500)
+      routing.settleDelayMs = p.displayRouting.settleDelayMs
+    if (Object.keys(routing).length > 0) out.displayRouting = routing
+  }
+
   return out
 }
 
 export function serialize(state: FormState): string {
   const out: Record<string, unknown> = {}
   if (state.name?.trim()) out.name = state.name.trim()
-  if (state.autoUpdate === false) out.autoUpdate = false
+  if (state.autoUpdate === true) out.autoUpdate = true
   if (state.logLevel && state.logLevel !== 'info') out.logLevel = state.logLevel
   if (state.lockFile?.trim()) out.lockFile = state.lockFile.trim()
   if (state.logFile?.trim()) out.logFile = state.logFile.trim()
   if (state.sessionLogFile?.trim()) out.sessionLogFile = state.sessionLogFile.trim()
+  if (state.controlPort !== undefined && state.controlPort !== 24801) out.controlPort = state.controlPort
   out.profiles = state.profiles.map(serializeProfile)
   return JSON.stringify(out, null, 2)
 }

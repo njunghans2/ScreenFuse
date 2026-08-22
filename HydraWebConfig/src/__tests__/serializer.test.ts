@@ -33,14 +33,14 @@ describe('serialize', () => {
     expect(json.logLevel).toBe('debug')
   })
 
-  it('omits autoUpdate when true (default)', () => {
+  it('includes autoUpdate when explicitly enabled', () => {
     const json = JSON.parse(serialize(state({ mode: 'Master' }, { autoUpdate: true })))
-    expect(json.autoUpdate).toBeUndefined()
+    expect(json.autoUpdate).toBe(true)
   })
 
-  it('includes autoUpdate when false', () => {
+  it('omits autoUpdate when false (default)', () => {
     const json = JSON.parse(serialize(state({ mode: 'Master' }, { autoUpdate: false })))
-    expect(json.autoUpdate).toBe(false)
+    expect(json.autoUpdate).toBeUndefined()
   })
 
   it('omits empty hosts array', () => {

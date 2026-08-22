@@ -46,6 +46,19 @@ export interface EmbeddedStyxConfig {
 export interface EmbeddedStyxServerConfig {
   port: number
   password: string
+  discoveryName?: string
+}
+
+export interface MonitorInputConfig {
+  id: string
+  input: number
+}
+
+export interface DisplayRoutingConfig {
+  inputs?: MonitorInputConfig[]
+  wakeDisplays?: boolean
+  sleepDisplays?: boolean
+  settleDelayMs?: number
 }
 
 // visual canvas item — one block per (host, screen?) pair in the layout editor
@@ -84,6 +97,7 @@ export interface HydraProfile {
   debugShield?: boolean
   deadCorners?: number
   conditions?: ConfigConditions
+  displayRouting?: DisplayRoutingConfig
 }
 
 // form state — profiles always an array; activeIndex tracks the selected profile tab
@@ -94,6 +108,7 @@ export interface FormState {
   lockFile?: string
   logFile?: string
   sessionLogFile?: string
+  controlPort?: number
   profiles: HydraProfile[]
   activeIndex: number
 }

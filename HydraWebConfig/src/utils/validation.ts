@@ -23,11 +23,6 @@ function effectiveHosts(p: HydraProfile): HostConfig[] {
 export function validate(profiles: HydraProfile[]): ValidationError[] {
   const errors: ValidationError[] = []
 
-  const defaults = profiles.filter(isUnconditional)
-  if (defaults.length > 1) {
-    errors.push({ path: 'profiles', message: 'at most one profile can be unconditional (no conditions)' })
-  }
-
   // check duplicate condition tuples
   const seen = new Set<string>()
   profiles.forEach((p, i) => {
@@ -59,6 +54,28 @@ export function validate(profiles: HydraProfile[]): ValidationError[] {
       errors.push({ path: `profiles[${i}].mode`, message: 'mode is required' })
     }
 
+    if (p.networkType === 'embeddedStyx') {
+      const server = p.embeddedStyx?.server.trim() ?? ''
+      if (!server || (!server.toLowerCase().startsWith('auto://') && !/^https?:\/\//i.test(server))) {
+        errors.push({ path: `profiles[${i}].embeddedStyx.server`, message: 'server must be auto://desk or an http(s) URL' })
+      }
+      if ((p.embeddedStyx?.password.length ?? 0) < 16) {
+        errors.push({ path: `profiles[${i}].embeddedStyx.password`, message: 'shared secret must be at least 16 characters' })
+      }
+    }
+    if (p.networkType === 'embeddedStyxServer') {
+      const relay = p.embeddedStyxServer
+      if (!relay || relay.port < 1024 || relay.port > 65535) {
+        errors.push({ path: `profiles[${i}].embeddedStyxServer.port`, message: 'relay port must be between 1024 and 65535' })
+      }
+      if ((relay?.password.length ?? 0) < 16) {
+        errors.push({ path: `profiles[${i}].embeddedStyxServer.password`, message: 'shared secret must be at least 16 characters' })
+      }
+      if ((relay?.discoveryName?.length ?? 0) > 64) {
+        errors.push({ path: `profiles[${i}].embeddedStyxServer.discoveryName`, message: 'desk name must be 64 characters or fewer' })
+      }
+    }
+
     if (p.remoteOnly && p.mode !== 'Master') {
       errors.push({ path: `profiles[${i}].remoteOnly`, message: 'remoteOnly requires Master mode' })
     }
@@ -82,6 +99,18 @@ export function validate(profiles: HydraProfile[]): ValidationError[] {
           path: `profiles[${i}].screenDefinitions[${si}]`,
           message: 'at least one of displayName, outputName, or platformId is required',
         })
+      }
+    })
+
+    if (p.displayRouting?.wakeDisplays && p.displayRouting?.sleepDisplays) {
+      errors.push({ path: `profiles[${i}].displayRouting`, message: 'display routing cannot wake and sleep displays together' })
+    }
+    if (p.displayRouting?.settleDelayMs !== undefined && (p.displayRouting.settleDelayMs < 0 || p.displayRouting.settleDelayMs > 10000)) {
+      errors.push({ path: `profiles[${i}].displayRouting`, message: 'settle delay must be between 0 and 10000 ms' })
+    }
+    ;(p.displayRouting?.inputs ?? []).forEach((input, di) => {
+      if (!input.id.trim() || input.input < 0 || input.input > 255) {
+        errors.push({ path: `profiles[${i}].displayRouting.inputs[${di}]`, message: 'monitor id is required and input must be between 0 and 255' })
       }
     })
   })

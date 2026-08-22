@@ -2,9 +2,12 @@ using Cathedral.Utils;
 using Common;
 using Common.DTO;
 using Common.Interfaces;
+using System.Diagnostics;
 using Hydra.Config;
+using Hydra.Discovery;
 using Microsoft.AspNetCore.Http.Connections.Client;
 using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System.Net.Sockets;
@@ -20,21 +23,26 @@ public class RelayConnection(IHydraProfile profile, ILogger<RelayConnection> log
     private IStyxServer? _server;
     private RelayEncryption? _encryption;
 
-    // outbound send queue — written synchronously, drained by the Connect loop.
-    // bounded as a backstop against unbounded growth if the link half-stalls (the drain loop can block on
-    // a single Send until the connection is declared dead, at which point the whole queue is discarded).
-    // mouse-move coalescing is read-side, so raw moves can accumulate here under a flood; DropOldest sheds
-    // the stalest frames — correct, since a dropped old mouse position is benign and freshest input wins.
-    private const int SendQueueCapacity = 8192;
-    private readonly Channel<(string[] Targets, byte[] Payload)> _sendQueue =
-        Channel.CreateBounded<(string[], byte[])>(
-            new BoundedChannelOptions(SendQueueCapacity)
-            {
-                SingleReader = true,
-                FullMode = BoundedChannelFullMode.DropOldest,
-            });
+    // Loss-tolerant mouse motion has a one-frame latest-value lane. Control/key messages
+    // are never discarded, while bulk file frames use an awaited bounded lane (~16 MiB).
+    private readonly Channel<(string[] Targets, byte[] Payload)> _controlQueue =
+        Channel.CreateUnbounded<(string[], byte[])>(new UnboundedChannelOptions { SingleReader = true });
+    private readonly Channel<(string[] Targets, byte[] Payload)> _mouseQueue =
+        Channel.CreateBounded<(string[], byte[])>(new BoundedChannelOptions(1)
+        {
+            SingleReader = true,
+            FullMode = BoundedChannelFullMode.DropOldest,
+        });
+    private readonly Channel<(string[] Targets, byte[] Payload)> _reliableQueue =
+        Channel.CreateBounded<(string[], byte[])>(new BoundedChannelOptions(32)
+        {
+            SingleReader = true,
+            FullMode = BoundedChannelFullMode.Wait,
+        });
+    private readonly SemaphoreSlim _sendSignal = new(0);
+    private int _mousePending;
 
-    protected virtual TimeSpan ReconnectDelay => TimeSpan.FromSeconds(Constants.ReconnectDelaySeconds);
+    protected virtual TimeSpan ReconnectDelay => TimeSpan.FromMilliseconds(Constants.ReconnectDelayMilliseconds);
 
     // RR5: ±25% jitter so peers that all dropped at once (e.g. a relay restart) don't reconnect in lockstep
     private static TimeSpan WithJitter(TimeSpan baseDelay)
@@ -53,7 +61,29 @@ public class RelayConnection(IHydraProfile profile, ILogger<RelayConnection> log
     {
         OnSent(targetHosts, payload);
         if (_server == null || _encryption == null) return;
-        _sendQueue.Writer.TryWrite((targetHosts, payload));
+        if (payload.Length > 0 && payload[0] == (byte)MessageKind.MouseMove)
+        {
+            _mouseQueue.Writer.TryWrite((targetHosts, payload));
+            if (Interlocked.Exchange(ref _mousePending, 1) == 0) _sendSignal.Release();
+        }
+        else if (_controlQueue.Writer.TryWrite((targetHosts, payload)))
+        {
+            _sendSignal.Release();
+        }
+    }
+
+    public async ValueTask SendReliableAsync(string[] targetHosts, byte[] payload, CancellationToken cancellationToken = default)
+    {
+        OnSent(targetHosts, payload);
+        while (await _reliableQueue.Writer.WaitToWriteAsync(cancellationToken))
+        {
+            if (_server == null || _encryption == null)
+                throw new InvalidOperationException("Relay is disconnected.");
+            if (!_reliableQueue.Writer.TryWrite((targetHosts, payload))) continue;
+            _sendSignal.Release();
+            return;
+        }
+        throw new InvalidOperationException("Relay send queue is closed.");
     }
 
     protected virtual void OnSent(string[] targetHosts, byte[] payload) { }
@@ -152,12 +182,27 @@ public class RelayConnection(IHydraProfile profile, ILogger<RelayConnection> log
 
         var hostName = profile.Name;
         log.LogInformation("Starting relay connection to {Server} as {HostName}", netConfig.StyxServer, hostName);
+        var retryDelay = ReconnectDelay;
 
         while (!cancel.IsCancellationRequested)
         {
+            var completedAuthenticatedSession = false;
             try
             {
-                await Connect(netConfig, hostName, cancel);
+                var attemptStarted = Stopwatch.GetTimestamp();
+                var connectionConfig = netConfig;
+                if (netConfig.StyxServer.StartsWith("auto://", StringComparison.OrdinalIgnoreCase))
+                {
+                    var deskName = netConfig.StyxServer[7..];
+                    using var discoveryTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+                    discoveryTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+                    log.LogInformation("Discovering ScreenFuse desk {Desk} on the LAN", deskName);
+                    var discovered = await LanDiscovery.FindServerAsync(deskName, netConfig.EncryptionKey, discoveryTimeout.Token);
+                    log.LogInformation("Discovered ScreenFuse relay at {Server}", discovered);
+                    connectionConfig = netConfig with { StyxServer = discovered };
+                }
+                var authenticated = await Connect(connectionConfig, hostName, cancel);
+                completedAuthenticatedSession = authenticated && Stopwatch.GetElapsedTime(attemptStarted) >= TimeSpan.FromSeconds(5);
             }
             catch (OperationCanceledException) when (cancel.IsCancellationRequested)
             {
@@ -165,22 +210,26 @@ public class RelayConnection(IHydraProfile profile, ILogger<RelayConnection> log
             }
             catch (OperationCanceledException)
             {
-                log.LogWarning("Relay connection lost — retrying in {ReconnectDelay}s", ReconnectDelay.TotalSeconds);
+                log.LogWarning("Relay connection lost");
             }
             catch (HttpRequestException ex)
             {
-                log.LogWarning("Relay connection failed — retrying in {ReconnectDelay}s: {Message}", ReconnectDelay.TotalSeconds, ex.InnerException?.Message ?? ex.Message);
+                log.LogWarning("Relay connection failed: {Message}", ex.InnerException?.Message ?? ex.Message);
             }
             catch (Exception ex)
             {
-                log.LogError(ex, "Relay connection failed — retrying in {ReconnectDelay}s", ReconnectDelay.TotalSeconds);
+                log.LogError(ex, "Relay connection failed");
             }
             finally
             {
                 var wasConnected = _server != null;
                 _server = null;
                 _encryption = null;
-                while (_sendQueue.Reader.TryRead(out _)) { } // discard stale outbound messages
+                while (_controlQueue.Reader.TryRead(out _)) { }
+                while (_mouseQueue.Reader.TryRead(out _)) { }
+                while (_reliableQueue.Reader.TryRead(out _)) { }
+                Interlocked.Exchange(ref _mousePending, 0);
+                while (_sendSignal.Wait(0)) { }
                 if (wasConnected)
                 {
                     // guard the disconnect callbacks: a throw here would escape Execute, and because the
@@ -200,11 +249,17 @@ public class RelayConnection(IHydraProfile profile, ILogger<RelayConnection> log
             }
 
             if (!cancel.IsCancellationRequested)
-                await Task.Delay(WithJitter(ReconnectDelay), cancel).ConfigureAwait(false);
+            {
+                if (completedAuthenticatedSession) retryDelay = ReconnectDelay;
+                log.LogInformation("Retrying relay in {ReconnectDelay:F2}s", retryDelay.TotalSeconds);
+                await Task.Delay(WithJitter(retryDelay), cancel).ConfigureAwait(false);
+                if (!completedAuthenticatedSession)
+                    retryDelay = TimeSpan.FromMilliseconds(Math.Min(retryDelay.TotalMilliseconds * 2, TimeSpan.FromSeconds(Constants.ReconnectMaxDelaySeconds).TotalMilliseconds));
+            }
         }
     }
 
-    private async Task Connect(NetworkConfig netConfig, string hostName, CancellationToken cancel)
+    private async Task<bool> Connect(NetworkConfig netConfig, string hostName, CancellationToken cancel)
     {
         using var disco = CancellationTokenSource.CreateLinkedTokenSource(cancel);
 
@@ -234,20 +289,43 @@ public class RelayConnection(IHydraProfile profile, ILogger<RelayConnection> log
         _encryption = new RelayEncryption(netConfig.EncryptionKey, peerState);
         _server = server;
 
-        // RR6: bound the auth round-trip so a server that accepts the socket then stalls the handshake
-        // doesn't hang the connect attempt — WaitAsync surfaces a timeout/cancel to the reconnect loop.
-        var response = await server.Authenticate(new RelayLogin
+        // Paired/embedded relays require a fresh proof bound to this connection. Older standalone
+        // Styx deployments can explicitly advertise legacy compatibility during migration.
+        RelayLoginResponse response;
+        try
         {
-            Authorization = netConfig.Authorization,
-            HostName = hostName
-        }).WaitAsync(TimeSpan.FromSeconds(Constants.AuthTimeoutSeconds), disco.Token);
+            var challenge = await server.BeginAuthenticate()
+                .WaitAsync(TimeSpan.FromSeconds(Constants.AuthTimeoutSeconds), disco.Token);
+            if (challenge.AllowsLegacy)
+            {
+                response = await AuthenticateLegacy(server, netConfig.Authorization, hostName, disco.Token);
+            }
+            else
+            {
+                var login = new RelayLoginV2
+                {
+                    Authorization = netConfig.Authorization,
+                    HostName = hostName,
+                    ChallengeId = challenge.ChallengeId,
+                    Proof = RelayAuthProof.Compute(netConfig.EncryptionKey, challenge, netConfig.Authorization,
+                        hostName, con.ConnectionId ?? throw new InvalidOperationException("Relay connection has no id.")),
+                };
+                response = await server.AuthenticateV2(login)
+                    .WaitAsync(TimeSpan.FromSeconds(Constants.AuthTimeoutSeconds), disco.Token);
+            }
+        }
+        catch (Exception ex) when (ex is HubException or MissingMethodException)
+        {
+            log.LogDebug("Relay does not support challenge authentication; trying legacy authentication");
+            response = await AuthenticateLegacy(server, netConfig.Authorization, hostName, disco.Token);
+        }
 
         if (!response.Authenticated)
         {
             _server = null;
             _encryption = null;
             log.LogError("Relay authentication failed: {Message}", response.Message);
-            return;
+            return false;
         }
 
         log.LogInformation("Authenticated on relay as {HostName}", hostName);
@@ -256,36 +334,16 @@ public class RelayConnection(IHydraProfile profile, ILogger<RelayConnection> log
         ConnectionToken = disco.Token;
         await OnAuthenticated();
 
-        // drain outbound queue until the connection drops
-        (string[] Targets, byte[] Payload)? lookahead = null;
+        // Drain with input priority. Mouse is latest-value only; reliable file frames
+        // make progress one at a time so keyboard/button traffic can preempt them.
         while (true)
         {
+            await _sendSignal.WaitAsync(disco.Token);
             (string[] Targets, byte[] Payload) item;
-            if (lookahead.HasValue)
-            {
-                item = lookahead.Value;
-                lookahead = null;
-            }
-            else
-            {
-                if (!await _sendQueue.Reader.WaitToReadAsync(disco.Token)) break;
-                if (!_sendQueue.Reader.TryRead(out item)) continue;
-            }
-
-            // coalesce mouse moves — skip intermediate positions, only send the latest
-            if (item.Payload.Length > 0 && item.Payload[0] == (byte)MessageKind.MouseMove)
-            {
-                while (_sendQueue.Reader.TryRead(out var next))
-                {
-                    if (next.Payload.Length > 0 && next.Payload[0] == (byte)MessageKind.MouseMove && next.Targets.SequenceEqual(item.Targets))
-                        item = next;
-                    else
-                    {
-                        lookahead = next;
-                        break;
-                    }
-                }
-            }
+            if (!_controlQueue.Reader.TryRead(out item) &&
+                !TryReadMouse(out item) &&
+                !_reliableQueue.Reader.TryRead(out item))
+                continue;
 
             try
             {
@@ -302,5 +360,19 @@ public class RelayConnection(IHydraProfile profile, ILogger<RelayConnection> log
                 log.LogWarning(ex, "Failed to send relay message to [{TargetHosts}]", string.Join(", ", item.Targets));
             }
         }
+        return true;
+    }
+
+    private static Task<RelayLoginResponse> AuthenticateLegacy(IStyxServer server, string authorization,
+        string hostName, CancellationToken cancellationToken) => server.Authenticate(new RelayLogin
+        {
+            Authorization = authorization,
+            HostName = hostName,
+        }).WaitAsync(TimeSpan.FromSeconds(Constants.AuthTimeoutSeconds), cancellationToken);
+
+    private bool TryReadMouse(out (string[] Targets, byte[] Payload) item)
+    {
+        Interlocked.Exchange(ref _mousePending, 0);
+        return _mouseQueue.Reader.TryRead(out item);
     }
 }

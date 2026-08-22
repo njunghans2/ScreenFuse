@@ -21,7 +21,7 @@ internal sealed class SessionWatchdog(ILogger<SessionWatchdog> log)
     protected override async Task Execute(CancellationToken cancel)
     {
         // lazy init so event exists before the child process is launched
-        _stopEvent ??= Win32Session.CreateGlobalEvent("HydraSessionStop", manualReset: true);
+        _stopEvent ??= Win32Session.CreateGlobalEvent("ScreenFuseSessionStop", manualReset: true);
 
         var session = Win32Session.GetActiveConsoleSessionId();
 

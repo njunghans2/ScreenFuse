@@ -2,6 +2,7 @@ using Cathedral.Utils;
 using Common.DTO;
 using Common.Interfaces;
 using Microsoft.AspNetCore.SignalR;
+using System.Security.Cryptography;
 using Styx.Filters;
 using Styx.Services;
 
@@ -9,8 +10,65 @@ namespace Styx;
 
 public class StyxHub(IClientRegistry registry, IPeerBroadcaster peers, IStyxPasswordProvider passwordProvider, ILogger<StyxHub> log, StyxOptions options) : Hub<IStyxClient>, IStyxServer
 {
+    private static readonly object ChallengeKey = new();
+
+    [AllowAnonymousHub]
+    public Task<RelayAuthChallenge> BeginAuthenticate()
+    {
+        var challenge = new RelayAuthChallenge
+        {
+            ChallengeId = Guid.NewGuid().ToString("N"),
+            Nonce = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)),
+            ExpiresAtUnixMs = DateTimeOffset.UtcNow.AddSeconds(10).ToUnixTimeMilliseconds(),
+            AllowsLegacy = options.AllowLegacyAuthentication,
+        };
+        lock (Context.Items) Context.Items[ChallengeKey] = challenge;
+        return Task.FromResult(challenge);
+    }
+
+    [AllowAnonymousHub]
+    public async Task<RelayLoginResponse> AuthenticateV2(RelayLoginV2? login)
+    {
+        RelayAuthChallenge? challenge = null;
+        if (login != null)
+        {
+            lock (Context.Items)
+            {
+                if (Context.Items.Remove(ChallengeKey, out var value)) challenge = value as RelayAuthChallenge;
+            }
+        }
+
+        if (login == null || challenge == null || login.ChallengeId != challenge.ChallengeId
+            || challenge.ExpiresAtUnixMs < DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            || string.IsNullOrWhiteSpace(login.Authorization) || string.IsNullOrWhiteSpace(login.HostName))
+            return await RejectV2("Invalid or expired authentication challenge");
+
+        try
+        {
+            var expected = Convert.FromBase64String(RelayAuthProof.Compute(passwordProvider.Password, challenge,
+                login.Authorization, login.HostName, Context.ConnectionId));
+            var supplied = Convert.FromBase64String(login.Proof);
+            if (!CryptographicOperations.FixedTimeEquals(expected, supplied))
+                return await RejectV2("Invalid challenge proof");
+        }
+        catch (Exception ex) when (ex is FormatException or CryptographicException or InvalidOperationException)
+        {
+            log.LogWarning("Challenge authentication rejected from {RemoteIp}: {Message}", RemoteIp, ex.Message);
+            return await RejectV2("Invalid challenge proof");
+        }
+
+        return await AuthenticateCore(new RelayLogin { Authorization = login.Authorization, HostName = login.HostName });
+    }
+
     [AllowAnonymousHub]
     public async Task<RelayLoginResponse> Authenticate(RelayLogin? login)
+    {
+        if (!options.AllowLegacyAuthentication)
+            return await RejectV2("Challenge authentication is required");
+        return await AuthenticateCore(login);
+    }
+
+    private async Task<RelayLoginResponse> AuthenticateCore(RelayLogin? login)
     {
         // throttle — minimum response time regardless of outcome
         var throttle = Task.Delay(TimeSpan.FromSeconds(Constants.AuthThrottleSeconds), Context.ConnectionAborted);
@@ -82,6 +140,12 @@ public class StyxHub(IClientRegistry registry, IPeerBroadcaster peers, IStyxPass
         // queue after throttle so Authenticated=true is sent to the caller before Peers arrives
         peers.QueueBroadcast(networkId);
         return new RelayLoginResponse { Authenticated = true };
+    }
+
+    private async Task<RelayLoginResponse> RejectV2(string message)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(Constants.AuthThrottleSeconds), Context.ConnectionAborted);
+        return new RelayLoginResponse { Authenticated = false, Message = message };
     }
 
     [AllowAnonymousHub]

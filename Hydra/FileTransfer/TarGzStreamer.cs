@@ -7,7 +7,7 @@ namespace Hydra.FileTransfer;
 
 public static class TarGzStreamer
 {
-    public static readonly int ChunkSize = (int)ByteSize.FromMebiBytes(16).Bytes;
+    public static readonly int ChunkSize = (int)ByteSize.FromKibiBytes(512).Bytes;
     public const int ProgressBufferSize = 256 * 1024; // shared by sender (ByteCountingStream) and receiver (ExtractFileEntryAsync)
 
     // estimates total uncompressed bytes across all files and directories
@@ -35,7 +35,7 @@ public static class TarGzStreamer
         return total;
     }
 
-    // creates a tar.gz stream from paths, calls onChunk for each 16 MiB chunk of compressed output.
+    // creates a tar.gz stream from paths, calls onChunk for each 512 KiB chunk of compressed output.
     // onChunk receives (compressedData, sequenceNumber, uncompressedBytesWrittenSoFar).
     // returns SHA-256 hash of all compressed bytes (same data the receiver will hash).
     public static async Task<byte[]> StreamAsync(List<string> paths, Func<byte[], int, long, Task> onChunk, Action<string> onFileStart, CancellationToken cancel)

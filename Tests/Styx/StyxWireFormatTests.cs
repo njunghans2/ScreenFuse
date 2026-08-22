@@ -38,6 +38,26 @@ public class StyxWireFormatTests
     }
 
     [Test]
+    public void ChallengeAuthentication_EncodesAsDocumented()
+    {
+        var challenge = new RelayAuthChallenge
+        {
+            ChallengeId = "0123456789abcdef0123456789abcdef",
+            Nonce = Convert.ToBase64String(new byte[32]),
+            ExpiresAtUnixMs = 1_700_000_000_000,
+            AllowsLegacy = false,
+        };
+        AssertEncodesAsDocumented(challenge, "RelayAuthChallenge");
+        AssertEncodesAsDocumented(new RelayLoginV2
+        {
+            Authorization = new string('t', 176),
+            HostName = "alpha-box",
+            ChallengeId = challenge.ChallengeId,
+            Proof = Convert.ToBase64String(new byte[32]),
+        }, "RelayLoginV2");
+    }
+
+    [Test]
     public void SendArguments_EncodeAsDocumented()
     {
         AssertEncodesAsDocumented(TwoHosts, "Send targetHosts");
