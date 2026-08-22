@@ -215,15 +215,21 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             // crossings only when someone presses Save leaves a desk whose monitors have moved —
             // or whose stored edges came from an older, worse rule — quietly unable to cross at
             // all, which is indistinguishable from the feature being broken.
+            // Written, never self-restarted. Restarting here to apply the new crossings turned a
+            // single disagreement into an unbreakable loop: the config is parsed with mirrors
+            // already expanded and rebuilt without them, so the comparison could never match, and
+            // the controller rewrote and restarted every few seconds — long before the relay had
+            // time to connect, so no peer ever joined and the desk stayed empty. The comparison is
+            // normalised now, but the restart stays gone: the crossings take effect at the next
+            // start, and no future disagreement can cost more than a stale edge until then.
             if (IsController && _snapshot.Monitors.Count > 0)
             {
                 var rebuilt = RebuildHosts(_config);
                 if (!SameTopology(_config, rebuilt))
                 {
-                    _log.LogInformation("Desk crossings changed; rewriting the computer layout");
+                    _log.LogInformation("Desk crossings changed; the new computer layout applies at the next restart");
                     _config = rebuilt;
                     await PersistAsync(push: true);
-                    ScheduleRestart();
                 }
             }
 
@@ -583,11 +589,32 @@ public sealed class DeskService : SimpleHostedService, IDeskService
     }
 
     // Compares only what the pointer cares about: who is next to whom, in which direction.
+    //
+    // Both sides are mirror-expanded first. A config read from disk has already been through
+    // ExpandMirrors, while a freshly derived one has not, so comparing them as written makes an
+    // identical layout look like a change — every single round.
     private static bool SameTopology(HydraConfigFile a, HydraConfigFile b)
     {
         static List<string> Edges(HydraConfigFile file) => file.Profiles
-            .SelectMany(p => p.Hosts.SelectMany(h => h.Neighbours.Select(n =>
-                $"{p.ProfileName}|{h.Name}|{n.Direction}|{n.Name}|{n.SourceScreen}|{n.DestScreen}".ToLowerInvariant())))
+            .SelectMany(p =>
+            {
+                var hosts = p.Hosts.Select(h => new HostConfig
+                {
+                    Name = h.Name,
+                    DeadCorners = h.DeadCorners,
+                    Neighbours = h.Neighbours.Select(n => new NeighbourConfig
+                    {
+                        Direction = n.Direction, Name = n.Name, Mirror = n.Mirror,
+                        SourceScreen = n.SourceScreen, DestScreen = n.DestScreen,
+                        SourceStart = n.SourceStart, SourceEnd = n.SourceEnd,
+                        DestStart = n.DestStart, DestEnd = n.DestEnd,
+                    }).ToList(),
+                }).ToList();
+                HydraConfig.ExpandMirrors(hosts);
+                return hosts.SelectMany(h => h.Neighbours.Select(n =>
+                    $"{p.ProfileName}|{h.Name}|{n.Direction}|{n.Name}|{n.SourceScreen}|{n.DestScreen}".ToLowerInvariant()));
+            })
+            .Distinct()
             .OrderBy(s => s, StringComparer.Ordinal)
             .ToList();
         return Edges(a).SequenceEqual(Edges(b), StringComparer.Ordinal);

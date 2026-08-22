@@ -127,8 +127,11 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
         return int.TryParse(token, out var value) && value is >= 0 and <= 255 ? value : null;
     }
 
-    // m1ddc display list prints one monitor per line: "[1] BenQ XL2420T (DisplayPort)".
-    private static List<PhysicalMonitorInfo> ParseM1Ddc(string output)
+    // m1ddc display list prints one monitor per line, as "[1] BenQ XL2420T (DisplayPort)" or,
+    // when macOS will not give up the name, "[1] (null) (37D8832A-2D66-02CA-B9F7-8F30A301B230)".
+    // The trailing parenthesised UUID is m1ddc's stable handle for the display: it identifies the
+    // monitor far better than the name does, and unlike the display number it survives a replug.
+    internal static List<PhysicalMonitorInfo> ParseM1Ddc(string output)
     {
         var monitors = new List<PhysicalMonitorInfo>();
         foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -136,10 +139,36 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
             var close = line.IndexOf(']');
             if (!line.StartsWith('[') || close < 0) continue;
             var id = line[1..close].Trim();
-            var description = line[(close + 1)..].Trim();
-            if (id.Length > 0) monitors.Add(new PhysicalMonitorInfo(id, description.Length > 0 ? description : id, Aliases: description.Length > 0 ? [description] : []));
+            if (id.Length == 0) continue;
+
+            var rest = line[(close + 1)..].Trim();
+            var uuid = TrailingUuid(rest);
+            var name = uuid == null ? rest : rest[..^(uuid.Length + 2)].Trim();
+            if (name.Equals("(null)", StringComparison.OrdinalIgnoreCase)) name = "";
+
+            var aliases = new List<string>();
+            if (name.Length > 0) aliases.Add(name);
+            // The UUID is an alias so the same panel is still recognised across restarts even
+            // when it is nameless, but it is never the label — nobody wants a monitor called
+            // 37D8832A-2D66-02CA-B9F7-8F30A301B230.
+            if (uuid != null) aliases.Add(uuid);
+
+            monitors.Add(new PhysicalMonitorInfo(
+                uuid ?? id,
+                name.Length > 0 ? name : $"Display {id}",
+                Aliases: aliases));
         }
         return monitors;
+    }
+
+    private static string? TrailingUuid(string text)
+    {
+        if (!text.EndsWith(')')) return null;
+        var open = text.LastIndexOf('(');
+        if (open < 0) return null;
+        var candidate = text[(open + 1)..^1].Trim();
+        var looksLikeUuid = candidate.Length >= 32 && candidate.All(c => char.IsAsciiHexDigit(c) || c == '-');
+        return looksLikeUuid ? candidate : null;
     }
 
     // ddcutil detect --brief prints stanzas: "Display 1" then indented "   I2C bus: /dev/i2c-6"

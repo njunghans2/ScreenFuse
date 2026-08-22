@@ -32,6 +32,7 @@ public static class DeskMerge
     [
         "genericpnpmonitor", "generalpnpmonitor", "pnpmonitor", "defaultmonitor", "digitalflatpanel",
         "monitor", "display", "unknown", "unknowndisplay", "screen",
+        "null", "none", "displayport", "hdmi", "usbc", "dvi", "vga",
     ];
 
     private static bool Same(string? a, string? b) =>
