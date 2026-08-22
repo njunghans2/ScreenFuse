@@ -58,16 +58,31 @@ public class TwoComputerDeskTests
     }
 
     [Test]
-    public async Task NothingAsksForARestartOnItsOwn()
+    public async Task TheControllerNeverRestartsItself()
     {
         using var desk = await Desk.ConvergedAsync();
         for (var i = 0; i < 6; i++) await desk.PumpAsync();
 
+        Assert.That(desk.Windows.Restarts, Is.Zero,
+            "restarting to apply its own desk change is what stopped the relay ever connecting");
+    }
+
+    [Test]
+    public async Task ThePeerStopsRestartingOnceTheDeskHasSettled()
+    {
+        // The first desk to arrive legitimately changes this computer's crossings, and that does
+        // need a restart. What must not happen is a second one, and a third, as the controller goes
+        // on learning input codes and nudging monitors.
+        using var desk = await Desk.ConvergedAsync();
+        var afterFirstSync = desk.Mac.Restarts;
+
+        for (var i = 0; i < 8; i++) await desk.PumpAsync();
+
         using (Assert.EnterMultipleScope())
         {
-            Assert.That(desk.Windows.Restarts, Is.Zero,
-                "restarting to apply a desk change is what stopped the relay ever connecting");
-            Assert.That(desk.Mac.Restarts, Is.Zero);
+            Assert.That(afterFirstSync, Is.LessThanOrEqualTo(1), "one restart to adopt the desk, no more");
+            Assert.That(desk.Mac.Restarts, Is.EqualTo(afterFirstSync),
+                "a peer that restarts every time the desk changes never stays up long enough to be useful");
         }
     }
 
@@ -99,6 +114,7 @@ public class TwoComputerDeskTests
     {
         public required Node Windows { get; init; }
         public required Node Mac { get; init; }
+        public required Wire Wire { get; init; }
 
         public static async Task<Desk> ConvergedAsync(bool announcePeers = true)
         {
@@ -118,7 +134,8 @@ public class TwoComputerDeskTests
                 await mac.Relay.FirePeersChanged("NINOG");
             }
 
-            var desk = new Desk { Windows = windows, Mac = mac };
+            var desk = new Desk { Windows = windows, Mac = mac, Wire = wire };
+            await wire.DrainAsync();
             for (var i = 0; i < 6; i++) await desk.PumpAsync();
             return desk;
         }
@@ -126,7 +143,9 @@ public class TwoComputerDeskTests
         public async Task PumpAsync()
         {
             await Mac.Service.PumpAsync();
+            await Wire.DrainAsync();
             await Windows.Service.PumpAsync();
+            await Wire.DrainAsync();
         }
 
         public void Dispose()
@@ -253,6 +272,7 @@ public class TwoComputerDeskTests
     private sealed class Wire
     {
         private readonly Dictionary<string, WiredRelay> _nodes = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Queue<(string From, string[] Targets, byte[] Payload)> _inFlight = new();
 
         public void Connect(Node a, Node b)
         {
@@ -260,13 +280,25 @@ public class TwoComputerDeskTests
             _nodes[b.Name] = b.Relay;
         }
 
-        public async Task DeliverAsync(string from, string[] targets, byte[] payload)
+        // IRelaySender.Send cannot be awaited, so deliveries are queued and drained at a known
+        // point instead of being fired into a discarded task. A test whose messages arrive whenever
+        // the scheduler feels like it passes and fails for reasons that have nothing to do with the
+        // code under test — which is exactly what happened, locally green and red on CI.
+        public void Queue(string from, string[] targets, byte[] payload) =>
+            _inFlight.Enqueue((from, targets, payload));
+
+        public async Task DrainAsync()
         {
-            foreach (var target in targets)
+            // Delivering a message can queue more, so keep going until the desk falls quiet.
+            for (var guard = 0; _inFlight.Count > 0 && guard < 200; guard++)
             {
-                if (!_nodes.TryGetValue(target, out var relay)) continue;
-                var decoded = MessageSerializer.Decode(payload);
-                await relay.ReceiveAsync(from, decoded.Kind, decoded.Bytes);
+                var (from, targets, payload) = _inFlight.Dequeue();
+                foreach (var target in targets)
+                {
+                    if (!_nodes.TryGetValue(target, out var relay)) continue;
+                    var decoded = MessageSerializer.Decode(payload);
+                    await relay.ReceiveAsync(from, decoded.Kind, decoded.Bytes);
+                }
             }
         }
     }
@@ -280,8 +312,7 @@ public class TwoComputerDeskTests
         public event Func<Task>? Disconnected;
 #pragma warning restore CS0067
 
-        public void Send(string[] targetHosts, byte[] payload) =>
-            _ = wire.DeliverAsync(name, targetHosts, payload);
+        public void Send(string[] targetHosts, byte[] payload) => wire.Queue(name, targetHosts, payload);
 
         public async Task ReceiveAsync(string from, MessageKind kind, ReadOnlyMemory<byte> body)
         {

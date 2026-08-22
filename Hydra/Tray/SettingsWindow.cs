@@ -6,8 +6,10 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.VisualTree;
 using Cathedral.Config;
 using Cathedral.Utils;
 using Hydra.Config;
@@ -358,8 +360,30 @@ internal sealed class SettingsWindow : Window
     private static TextBlock Hint(string text) => new() { Text = text, Opacity = 0.72, TextWrapping = TextWrapping.Wrap };
     private static ScrollViewer Scroll(Control content) => new() { Content = content, Padding = new Thickness(12), VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto };
     private static TabItem Tab(string header, Control content) => new() { Header = header, Content = content };
-    private static ComboBox Choice(params string[] choices) => new() { ItemsSource = choices, SelectedIndex = 0, MinWidth = 300 };
-    private static NumericUpDown Number(decimal value, decimal min, decimal max, decimal increment = 1) => new() { Value = value, Minimum = min, Maximum = max, Increment = increment, MinWidth = 140 };
+    private static ComboBox Choice(params string[] choices) => NoWheel(new ComboBox { ItemsSource = choices, SelectedIndex = 0, MinWidth = 300 });
+    private static NumericUpDown Number(decimal value, decimal min, decimal max, decimal increment = 1) => NoWheel(new NumericUpDown { Value = value, Minimum = min, Maximum = max, Increment = increment, MinWidth = 140 });
+
+    // Stops the mouse wheel changing a value.
+    //
+    // A ComboBox and a NumericUpDown both take the wheel as input, so scrolling the settings page
+    // with the pointer anywhere over one silently changes it. On this desk that is not a harmless
+    // edit — a monitor's picker applies immediately, so scrolling past it switches a real monitor to
+    // another computer. The wheel is taken before the control sees it and given to the page, which
+    // is what the user was reaching for.
+    internal static T NoWheel<T>(T control) where T : Control
+    {
+        control.AddHandler(
+            InputElement.PointerWheelChangedEvent,
+            (_, e) =>
+            {
+                e.Handled = true;
+                if (control.FindAncestorOfType<ScrollViewer>() is not { } scroller) return;
+                var reach = Math.Max(0, scroller.Extent.Height - scroller.Viewport.Height);
+                scroller.Offset = scroller.Offset.WithY(Math.Clamp(scroller.Offset.Y - e.Delta.Y * 50, 0, reach));
+            },
+            RoutingStrategies.Tunnel);
+        return control;
+    }
     private static T At<T>(T control, int row) where T : Control { Grid.SetRow(control, row); return control; }
 
     internal static Button Action(string label, Func<Task> action, bool accent = false)

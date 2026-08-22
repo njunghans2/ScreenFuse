@@ -46,6 +46,9 @@ internal sealed class DeskCanvas : Border
     private Control? _dragging;
     private string? _draggingId;
     private Point _grabOffset;
+    private string _signature = "";
+    private bool _dirty;
+    private bool _pickerOpen;
 
     internal DeskCanvas(Func<string, string, Task> onHostPicked, Func<IReadOnlyList<DeskPlacement>, Task> onArranged)
     {
@@ -61,8 +64,32 @@ internal sealed class DeskCanvas : Border
         SizeChanged += (_, _) => Layout();
     }
 
+    // What the drawn desk depends on. Anything not in here cannot change what the user sees, so
+    // rebuilding for it only throws away whatever they were in the middle of doing.
+    private static string Signature(IReadOnlyList<DeskMonitorView> monitors, IReadOnlyList<string> hosts) =>
+        string.Join('|', monitors.Select(m =>
+                $"{m.Id}:{m.Label}:{m.DeskX},{m.DeskY},{m.Width}x{m.Height}:{m.ActiveHost}:{string.Join(',', m.Sources.Select(s => s.Host))}")
+            .Append(string.Join(',', hosts)));
+
     internal void Update(IReadOnlyList<DeskMonitorView> monitors, IReadOnlyList<string> hosts)
     {
+        // The desk refreshes every few seconds whether or not anything moved. Rebuilding the tiles
+        // each time closes any dropdown the user has open and resets a choice they just made, which
+        // is why a selection could appear not to take and then change on its own moments later.
+        var signature = Signature(monitors, hosts);
+        if (signature == _signature && !_dirty) return;
+        _signature = signature;
+        _dirty = false;
+
+        // Never rebuild under an open dropdown — that is the one moment the user is certainly
+        // looking at it. The next refresh picks the change up.
+        if (_pickerOpen)
+        {
+            _dirty = true;
+            _signature = "";
+            return;
+        }
+
         _monitors = monitors;
         _hosts = hosts;
         _desk.Clear();
@@ -129,10 +156,24 @@ internal sealed class DeskCanvas : Border
         var choices = monitor.Sources.Select(s => s.Host).ToList();
         if (choices.Count > 1)
         {
-            var combo = new ComboBox { ItemsSource = choices, MinWidth = 96, FontSize = 12, HorizontalAlignment = HorizontalAlignment.Stretch };
+            var combo = SettingsWindow.NoWheel(new ComboBox
+            {
+                ItemsSource = choices,
+                MinWidth = 96,
+                FontSize = 12,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            });
             combo.SelectedItem = choices.FirstOrDefault(c => string.Equals(c, monitor.ActiveHost, StringComparison.OrdinalIgnoreCase));
+
+            // Only a choice the user actually made switches a monitor. Setting the selection in code
+            // raises the same event, so without this the desk would act on its own refreshes.
+            var armed = false;
+            combo.DropDownOpened += (_, _) => { _pickerOpen = true; armed = true; };
+            combo.DropDownClosed += (_, _) => _pickerOpen = false;
             combo.SelectionChanged += async (_, _) =>
             {
+                if (!armed) return;
+                armed = false;
                 if (combo.SelectedItem is not string picked) return;
                 if (string.Equals(picked, monitor.ActiveHost, StringComparison.OrdinalIgnoreCase)) return;
                 await _onHostPicked(monitor.Id, picked);

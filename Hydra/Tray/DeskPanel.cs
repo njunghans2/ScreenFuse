@@ -17,8 +17,8 @@ internal sealed class DeskPanel : UserControl
     private readonly Action<string> _status;
 
     private readonly DeskCanvas _canvas;
-    private readonly ComboBox _controller = new() { MinWidth = 190 };
-    private readonly ComboBox _profiles = new() { MinWidth = 190 };
+    private readonly ComboBox _controller = SettingsWindow.NoWheel(new ComboBox { MinWidth = 190 });
+    private readonly ComboBox _profiles = SettingsWindow.NoWheel(new ComboBox { MinWidth = 190 });
     private readonly TextBox _newProfile = new() { PlaceholderText = "Name this setup", MinWidth = 190 };
     private readonly TextBlock _peers = new() { Opacity = 0.72, TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _role = new() { Opacity = 0.72, TextWrapping = TextWrapping.Wrap };
@@ -180,18 +180,18 @@ internal sealed class DeskPanel : UserControl
                 Func<int?> read;
                 if (offered.Count > 0)
                 {
-                    var combo = new ComboBox
+                    var combo = SettingsWindow.NoWheel(new ComboBox
                     {
                         ItemsSource = offered.Select(InputName).ToList(),
                         MinWidth = 150,
                         SelectedIndex = source?.Input is { } known ? offered.IndexOf(known) : -1,
-                    };
+                    });
                     input = combo;
                     read = () => combo.SelectedIndex >= 0 ? offered[combo.SelectedIndex] : null;
                 }
                 else
                 {
-                    var number = new NumericUpDown { Minimum = 0, Maximum = 255, Increment = 1, Value = source?.Input, MinWidth = 150 };
+                    var number = SettingsWindow.NoWheel(new NumericUpDown { Minimum = 0, Maximum = 255, Increment = 1, Value = source?.Input, MinWidth = 150 });
                     input = number;
                     read = () => number.Value is { } v ? decimal.ToInt32(v) : null;
                 }
