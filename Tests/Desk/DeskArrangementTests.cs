@@ -81,14 +81,18 @@ public class DeskArrangementTests
     }
 
     [Test]
-    public void MonitorsFarApartAreNotConnected()
+    public void MonitorsFarApartStillCrossBecauseOneIsStillBesideTheOther()
     {
+        // Distance is not the question. However much space is between them, one of these is to the
+        // left of the other and the pointer should travel that way; an earlier rule required them
+        // to touch, which left a sensible arrangement with nothing to cross at.
         var monitors = new List<DeskMonitorConfig> { Monitor("left", "mac", 0, 0), Monitor("right", "pc", 4000, 0) };
         var placed = DeskArrangement.Place(monitors, id => id == "left" ? "mac" : "pc");
 
         var hosts = DeskArrangement.BuildHosts(placed, ["mac", "pc"]);
 
-        Assert.That(hosts.SelectMany(h => h.Neighbours), Is.Empty);
+        var mac = hosts.Single(h => h.Name == "mac");
+        Assert.That(mac.Neighbours.Single().Direction, Is.EqualTo(Direction.Right));
     }
 
     [Test]

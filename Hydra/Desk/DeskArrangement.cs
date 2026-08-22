@@ -55,13 +55,18 @@ public static class DeskArrangement
             if (!string.IsNullOrWhiteSpace(name) && !hosts.ContainsKey(name))
                 hosts[name] = new HostConfig { Name = name };
 
-        // How much edge each pair of computers shares, per direction. The longest shared edge is the
-        // one the user means by putting those monitors next to each other.
-        var shared = new Dictionary<(string From, string To, Direction Dir), int>();
-        void Note(string from, string to, Direction dir, int amount)
+        // Which side of which, and how squarely — for every pair of monitors on different computers.
+        //
+        // Position decides this, not contact. Two monitors with a gap between them are still one to
+        // the left of the other, exactly as they are on the desk, and the pointer should cross
+        // between them; requiring them to touch made a perfectly sensible arrangement do nothing.
+        // Facing edge length is what ranks the candidates, with the closer pair breaking a tie.
+        var shared = new Dictionary<(string From, string To, Direction Dir), (int Facing, int Gap)>();
+        void Note(string from, string to, Direction dir, int facing, int gap)
         {
             var key = (from, to, dir);
-            shared[key] = shared.GetValueOrDefault(key) + amount;
+            var current = shared.GetValueOrDefault(key);
+            shared[key] = (current.Facing + facing, current.Facing == 0 ? gap : Math.Min(current.Gap, gap));
         }
 
         foreach (var a in placed)
@@ -70,10 +75,22 @@ public static class DeskArrangement
             {
                 if (ReferenceEquals(a, b) || a.Host.Equals(b.Host, StringComparison.OrdinalIgnoreCase)) continue;
 
-                if (Touching(a.Right, b.X) && Overlap(a.Y, a.Bottom, b.Y, b.Bottom) is var (top, bottom) && bottom > top)
-                    Note(a.Host, b.Host, Direction.Right, bottom - top);
-                else if (Touching(a.Bottom, b.Y) && Overlap(a.X, a.Right, b.X, b.Right) is var (left, right) && right > left)
-                    Note(a.Host, b.Host, Direction.Down, right - left);
+                var (top, bottom) = Overlap(a.Y, a.Bottom, b.Y, b.Bottom);
+                var (left, right) = Overlap(a.X, a.Right, b.X, b.Right);
+
+                // Side by side: they face each other across whatever vertical span they share.
+                if (bottom > top)
+                {
+                    if (b.X >= a.Right) Note(a.Host, b.Host, Direction.Right, bottom - top, b.X - a.Right);
+                    else if (b.Right <= a.X) Note(a.Host, b.Host, Direction.Left, bottom - top, a.X - b.Right);
+                }
+
+                // Stacked: same idea, turned ninety degrees.
+                if (right > left)
+                {
+                    if (b.Y >= a.Bottom) Note(a.Host, b.Host, Direction.Down, right - left, b.Y - a.Bottom);
+                    else if (b.Bottom <= a.Y) Note(a.Host, b.Host, Direction.Up, right - left, a.Y - b.Bottom);
+                }
             }
         }
 
@@ -82,7 +99,10 @@ public static class DeskArrangement
         // on both sides of another still gets a working return path.
         foreach (var group in shared.GroupBy(e => Unordered(e.Key.From, e.Key.To)))
         {
-            var best = group.MaxBy(e => e.Value);
+            var best = group
+                .OrderByDescending(e => e.Value.Facing)
+                .ThenBy(e => e.Value.Gap)
+                .First();
             var (from, to, dir) = best.Key;
             var host = hosts[from];
             if (host.Neighbours.Any(n => n.Name.Equals(to, StringComparison.OrdinalIgnoreCase))) continue;

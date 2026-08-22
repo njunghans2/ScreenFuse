@@ -101,6 +101,18 @@ public class TwoComputerDeskTests
     }
 
     [Test]
+    public async Task TheDeskArrangesItselfSoThePointerCanActuallyCross()
+    {
+        // A desk nobody has arranged by hand still has to work. Placing each computer's monitors
+        // with a gap between them looked tidier and left the neighbour list empty, so the pointer
+        // could never leave the computer it started on — with nothing anywhere saying why.
+        using var desk = await Desk.ConvergedAsync();
+
+        var neighbours = desk.Windows.Config.Profiles.SelectMany(p => p.Hosts).SelectMany(h => h.Neighbours).ToList();
+        Assert.That(neighbours, Is.Not.Empty, "an automatically arranged desk must have somewhere to cross");
+    }
+
+    [Test]
     public async Task TheNamelessMacMonitorIsNotCalledNull()
     {
         using var desk = await Desk.ConvergedAsync();

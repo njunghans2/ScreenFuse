@@ -22,6 +22,9 @@ public record DeskMergeResult(List<DeskMonitorConfig> Monitors, List<DeskMonitor
 // containment, with the names that identify nothing at all excluded outright.
 public static class DeskMerge
 {
+    // Space between one computer's monitors and the next, when the desk arranges itself. It is
+    // presentation only: a crossing follows from one monitor being beside another, not from the two
+    // touching, so this can be whatever reads best without affecting whether the pointer can move.
     private const int GroupGap = 160;
     private const int MinAliasLength = 4;
 

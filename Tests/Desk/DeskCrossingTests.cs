@@ -88,8 +88,11 @@ public class DeskCrossingTests
     }
 
     [Test]
-    public void MonitorsThatDoNotTouchProduceNoCrossing()
+    public void MonitorsWithAGapBetweenThemStillCross()
     {
+        // Two monitors with space between them are still one to the left of the other, exactly as
+        // they sit on the desk. Requiring them to touch made a perfectly sensible arrangement do
+        // nothing at all, with an empty neighbour list as the only evidence.
         List<DeskMonitorConfig> apart =
         [
             Monitor("a", "A", 0, 0, 1920, 1080, "NINOG"),
@@ -97,6 +100,42 @@ public class DeskCrossingTests
         ];
 
         var hosts = DeskArrangement.BuildHosts(Place(apart), ["NINOG", "Mac"]);
+
+        var ninog = hosts.Single(h => h.Name == "NINOG");
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(ninog.Neighbours, Has.Count.EqualTo(1));
+            Assert.That(ninog.Neighbours[0].Direction, Is.EqualTo(Direction.Right));
+        }
+    }
+
+    [Test]
+    public void AMonitorAboveAnotherCrossesUpwards()
+    {
+        List<DeskMonitorConfig> stacked =
+        [
+            Monitor("below", "Below", 0, 1200, 1920, 1080, "NINOG"),
+            Monitor("above", "Above", 0, 0, 1920, 1080, "Mac"),
+        ];
+
+        var hosts = DeskArrangement.BuildHosts(Place(stacked), ["NINOG", "Mac"]);
+
+        var ninog = hosts.Single(h => h.Name == "NINOG");
+        Assert.That(ninog.Neighbours.Single().Direction, Is.EqualTo(Direction.Up));
+    }
+
+    [Test]
+    public void MonitorsSharingNoEdgeAtAllProduceNoCrossing()
+    {
+        // Diagonal: nothing of one faces anything of the other, so there is no sensible edge to
+        // cross at and none is invented.
+        List<DeskMonitorConfig> diagonal =
+        [
+            Monitor("a", "A", 0, 0, 1920, 1080, "NINOG"),
+            Monitor("b", "B", 4000, 4000, 1920, 1080, "Mac"),
+        ];
+
+        var hosts = DeskArrangement.BuildHosts(Place(diagonal), ["NINOG", "Mac"]);
 
         Assert.That(hosts.SelectMany(h => h.Neighbours), Is.Empty);
     }
