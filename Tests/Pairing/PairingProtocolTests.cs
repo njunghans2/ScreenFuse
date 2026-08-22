@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Net;
+using System.Net.Sockets;
 using Hydra.Config;
 using Hydra.Pairing;
 using Hydra.Screen;
@@ -10,8 +12,11 @@ public class PairingProtocolTests
     [Test]
     public async Task TwoFreshInstallations_DiscoverAndMutuallyApproveOnTheLanSocket()
     {
-        await using var first = new PairingDiscovery();
-        await using var second = new PairingDiscovery();
+        var firstPort = FreeUdpPort();
+        var secondPort = FreeUdpPort();
+        while (secondPort == firstPort) secondPort = FreeUdpPort();
+        await using var first = new PairingDiscovery(firstPort, secondPort);
+        await using var second = new PairingDiscovery(secondPort, firstPort);
         var firstFound = Source<PairingCandidate>();
         var secondFound = Source<PairingCandidate>();
         var firstCompleted = Source<PairingCandidate>();
@@ -136,6 +141,12 @@ public class PairingProtocolTests
 
     private static TaskCompletionSource<T> Source<T>() =>
         new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static int FreeUdpPort()
+    {
+        using var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        return ((IPEndPoint)socket.Client.LocalEndPoint!).Port;
+    }
 
     private static string NativeJson(HydraConfigFile config) =>
         Hydra.Tray.NativeSettingsPersistence.SerializeAndValidate(config, "pair.conf");

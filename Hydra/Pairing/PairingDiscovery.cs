@@ -175,6 +175,8 @@ internal static class PairingProtocol
 
 internal sealed class PairingDiscovery : IAsyncDisposable
 {
+    private readonly int _listenPort;
+    private readonly int _targetPort;
     private readonly Guid _instanceId = Guid.NewGuid();
     private readonly string _host = Environment.MachineName.Split('.')[0];
     private readonly long _startedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -198,8 +200,12 @@ internal sealed class PairingDiscovery : IAsyncDisposable
     internal event Action<PairingCandidate>? CandidateFound;
     internal event Action<PairingCandidate>? PairingCompleted;
 
-    internal PairingDiscovery()
+    internal PairingDiscovery(int listenPort = PairingProtocol.Port, int? targetPort = null)
     {
+        if (listenPort is < 1024 or > 65535 || targetPort is < 1024 or > 65535)
+            throw new ArgumentOutOfRangeException(nameof(listenPort));
+        _listenPort = listenPort;
+        _targetPort = targetPort ?? listenPort;
         _publicKey = _key.ExportSubjectPublicKeyInfo();
         _commitment = PairingProtocol.CreateCommitment(_instanceId, _host, _startedAtUnixMs, _publicKey, _nonce);
     }
@@ -209,7 +215,7 @@ internal sealed class PairingDiscovery : IAsyncDisposable
         if (_client != null) return Task.CompletedTask;
         _client = new UdpClient(AddressFamily.InterNetwork) { ExclusiveAddressUse = false };
         _client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-        _client.Client.Bind(new IPEndPoint(IPAddress.Any, PairingProtocol.Port));
+        _client.Client.Bind(new IPEndPoint(IPAddress.Any, _listenPort));
         _client.JoinMulticastGroup(PairingProtocol.MulticastAddress);
         _client.EnableBroadcast = true;
         _client.MulticastLoopback = true;
@@ -285,8 +291,8 @@ internal sealed class PairingDiscovery : IAsyncDisposable
     private async Task SendPacketAsync(byte[] payload, CancellationToken cancellationToken)
     {
         if (_client == null) throw new InvalidOperationException("Pairing has not started.");
-        await _client.SendAsync(payload, new IPEndPoint(PairingProtocol.MulticastAddress, PairingProtocol.Port), cancellationToken);
-        await _client.SendAsync(payload, new IPEndPoint(IPAddress.Broadcast, PairingProtocol.Port), cancellationToken);
+        await _client.SendAsync(payload, new IPEndPoint(PairingProtocol.MulticastAddress, _targetPort), cancellationToken);
+        await _client.SendAsync(payload, new IPEndPoint(IPAddress.Broadcast, _targetPort), cancellationToken);
     }
 
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
