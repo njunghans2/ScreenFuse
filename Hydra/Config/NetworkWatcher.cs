@@ -38,7 +38,7 @@ internal sealed class NetworkWatcher : SimpleHostedService
         _activeConfig = activeConfig;
         _profileOverride = profileOverride;
         _dormancy = dormancy;
-        _restart = restart ?? ProcessRestart.Restart;
+        _restart = restart ?? (() => ProcessRestart.Restart("network or screen conditions changed"));
         _now = clock ?? (() => DateTime.UtcNow);
         _log = log;
 

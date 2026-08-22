@@ -42,6 +42,80 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
         }
     }
 
+    public async Task<DisplayCommandResult> SetInputAsync(string id, int input, CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var result = OperatingSystem.IsWindows()
+                ? WindowsDdc.SetInput(id, input)
+                : await SetInputWithHelperAsync(new MonitorInputConfig { Id = id, Input = input }, cancellationToken);
+            if (!result.Success)
+                log.LogWarning("Display command failed: {Command}: {Detail}", result.Command, result.Detail);
+            return result;
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<IReadOnlyList<PhysicalMonitorInfo>> InventoryAsync(CancellationToken cancellationToken = default)
+    {
+        if (OperatingSystem.IsWindows()) return WindowsDdc.Inventory();
+
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var probe = OperatingSystem.IsMacOS()
+                ? await RunAsync("m1ddc", ["display", "list"], "m1ddc display list", cancellationToken)
+                : OperatingSystem.IsLinux()
+                    ? await RunAsync("ddcutil", ["detect", "--brief"], "ddcutil detect", cancellationToken)
+                    : new DisplayCommandResult("inventory", false, "Unsupported operating system");
+            if (!probe.Success || string.IsNullOrWhiteSpace(probe.Detail)) return [];
+            return OperatingSystem.IsMacOS() ? ParseM1Ddc(probe.Detail) : ParseDdcutil(probe.Detail);
+        }
+        finally { _gate.Release(); }
+    }
+
+    // m1ddc display list prints one monitor per line: "[1] BenQ XL2420T (DisplayPort)".
+    private static List<PhysicalMonitorInfo> ParseM1Ddc(string output)
+    {
+        var monitors = new List<PhysicalMonitorInfo>();
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var close = line.IndexOf(']');
+            if (!line.StartsWith('[') || close < 0) continue;
+            var id = line[1..close].Trim();
+            var description = line[(close + 1)..].Trim();
+            if (id.Length > 0) monitors.Add(new PhysicalMonitorInfo(id, description.Length > 0 ? description : id));
+        }
+        return monitors;
+    }
+
+    // ddcutil detect --brief prints stanzas: "Display 1" then indented "   I2C bus: /dev/i2c-6"
+    // and "   Monitor: BNQ:BenQ XL2420T:serial".
+    private static List<PhysicalMonitorInfo> ParseDdcutil(string output)
+    {
+        var monitors = new List<PhysicalMonitorInfo>();
+        string? id = null;
+        string? description = null;
+        foreach (var raw in output.Split('\n'))
+        {
+            var line = raw.TrimEnd();
+            if (line.StartsWith("Display ", StringComparison.OrdinalIgnoreCase))
+            {
+                if (id != null) monitors.Add(new PhysicalMonitorInfo(id, description ?? id));
+                id = line["Display ".Length..].Trim();
+                description = null;
+            }
+            else if (line.TrimStart().StartsWith("Monitor:", StringComparison.OrdinalIgnoreCase))
+            {
+                var parts = line.Split(':', StringSplitOptions.TrimEntries);
+                description = parts.Length >= 3 ? parts[2] : line.Trim();
+            }
+        }
+        if (id != null) monitors.Add(new PhysicalMonitorInfo(id, description ?? id));
+        return monitors;
+    }
+
     public async Task<IReadOnlyList<DisplayCommandResult>> DoctorAsync(CancellationToken cancellationToken = default)
     {
         if (OperatingSystem.IsWindows()) return WindowsDdc.Probe();
@@ -125,13 +199,33 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return new DisplayCommandResult(label, false, ex.Message);
+            return new DisplayCommandResult(label, false, Explain(fileName, ex));
         }
         finally
         {
             if (cancellationToken.IsCancellationRequested) TryKill(process);
             process?.Dispose();
         }
+    }
+
+    // "No such file or directory" is the operating system talking about the helper, not the monitor.
+    // Say which helper is missing and how to get it, since nothing about display routing works
+    // without it and the raw message sends people looking in the wrong place.
+    private static string Explain(string fileName, Exception ex)
+    {
+        var missing = ex is System.ComponentModel.Win32Exception { NativeErrorCode: 2 }
+            || ex.Message.Contains("No such file or directory", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("cannot find the file", StringComparison.OrdinalIgnoreCase);
+        if (!missing) return ex.Message;
+
+        var install = fileName switch
+        {
+            "m1ddc" => "Install it with: brew install m1ddc",
+            "ddcutil" => "Install it with your package manager, for example: sudo apt install ddcutil",
+            _ => null,
+        };
+        return $"'{fileName}' is not installed, so ScreenFuse cannot switch monitor inputs on this computer."
+            + (install == null ? "" : $" {install}");
     }
 
     private static void TryKill(Process? process)

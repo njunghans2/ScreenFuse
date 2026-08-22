@@ -51,12 +51,14 @@ CONFIG=/path/to/screenfuse.conf ./screenfuse
 - `autoUpdate` — reserved compatibility field; official builds currently require explicit package updates (default: `false`)
 - `controlPort` — loopback scene-control page/API port (default: `24801`)
 - `lockFile` — path to a lock file to prevent multiple instances (default: none)
+- `monitors` — the desk: every physical monitor, where it sits, and how each computer reaches it (see [The desk](#the-desk)). Written by the settings window; you rarely edit it by hand.
 - `profiles` — array of profile objects (see below); at least one required
 
 **Per-profile** (inside a `profiles` entry):
 
 - `profileName` — name for this profile, logged at startup so you know which one is active (no duplicates allowed)
-- `mode` — `Master` or `Slave`
+- `mode` — `Master` or `Slave`. Ignored when `controller` is set.
+- `controller` — the name of the computer that holds the keyboard and mouse in this scene. When set, each computer derives its own role from it (`controller` runs as master, everyone else as slave), which is what lets a single desk document be shared verbatim between machines and lets control move without rewriting any config. Role-specific keys such as `hideCursor` and `mouseScale` may then travel together in one document; each machine ignores the ones that do not apply to it.
 - `networkConfig` — base64 relay config string from the Styx web UI; use this to connect to a standalone Styx server
 - `embeddedStyx` — connect using `{ "server": "auto://<desk-name>", "password": "<password>" }` for zero-address-config LAN discovery, or an explicit `http://<host>:<port>` URL
 - `embeddedStyxServer` — run a relay in this process: `{ "port": 5000, "password": "<password>", "discoveryName": "studio" }`; `discoveryName` enables link-local advertisements for matching `auto://studio` clients
@@ -72,6 +74,45 @@ CONFIG=/path/to/screenfuse.conf ./screenfuse
   - `screenCount` — activates when exactly this many screens are connected (integer ≥ 1)
   - `isPluggedIn` — `true` activates when on AC power; `false` activates when on battery
 
+## The desk
+
+The **Monitors** tab of the settings window shows every monitor on the desk — including the ones attached to the other computers — arranged the way it physically stands, the same way the operating system's own display settings do. Drag a monitor to move it; pick a computer on a monitor to switch that monitor's input to it immediately. Saving a named setup afterwards is what turns the arrangement you are looking at into a scene.
+
+Three things make this work, and they are all stored at the root of the config as `monitors`:
+
+```json
+"monitors": [
+  {
+    "id": "benq-xl2420t",
+    "label": "BenQ XL2420T",
+    "deskX": 1920, "deskY": 0, "width": 1920, "height": 1080,
+    "sources": [
+      { "host": "NINOG", "input": 15, "ddcId": "\\\\.\\DISPLAY2", "screenId": "NINOG:1" },
+      { "host": "Mac",   "input": 17, "ddcId": "1",              "screenId": "Mac" }
+    ]
+  }
+]
+```
+
+- `deskX`/`deskY`/`width`/`height` are desk coordinates — the physical layout, independent of which computer is currently on the monitor.
+- `sources` records how each computer reaches the monitor: `input` is the MCCS VCP `0x60` value that selects that computer, `ddcId` is the identifier that computer's DDC helper answers to, and `screenId` is the name its screen detector reports.
+- `input` values are **learned automatically**: a computer that can read a monitor over DDC is by definition looking at its own input, so the value it reads is the code that selects it. Fill one in by hand only for a computer that has never been on that monitor while ScreenFuse was running.
+
+A monitor showing another computer's input usually disappears from the local enumeration entirely, which has two consequences worth knowing:
+
+- The computer that is **not** the active source generally cannot command the monitor. Switching is therefore delegated: the desk asks whichever computer currently drives a monitor to issue the DDC command.
+- The `monitors` table is the desk's memory of monitors nobody can currently see. Deleting it loses the learned input codes.
+
+The crossing edges in `hosts` are **derived** from the arrangement plus each scene's monitor assignments — two monitors that touch on the desk become a crossing only while different computers are on them, and the shared portion of the touching edge becomes the percentage range. Editing `hosts` by hand still works, but the settings window rewrites it whenever the arrangement changes.
+
+## Handing over the keyboard
+
+`controller` names the computer that owns the keyboard and mouse. Changing it in the settings window writes a `.screenfuse-controller` file next to the config on every computer and restarts each agent into its new role; activating a scene clears that override, because a scene names its own controller.
+
+The relay does **not** move with the controller. The computer running `embeddedStyxServer` keeps running it, and its own role simply changes — otherwise handing over the keyboard would drop the connection that carries the handover.
+
+Settings are shared: the controller pushes the desk document to every peer, which merges it with its own identity (`name`, log paths, `controlPort`) and its own relay stanza and pointer tuning, then restarts. There is one place to edit the desk, whichever computer you are sitting at.
+
 ## Desk scenes and display routing
 
 Multiple named profiles without `conditions` are selectable desk scenes. Use the local master control page (`screenfuse --setup`) or CLI (`screenfuse --scene "Scene name"`) to activate one. ScreenFuse refuses a manual switch until every host configured in the current topology is connected, broadcasts the selection, persists it, and restarts each agent into the matching local profile.
@@ -80,6 +121,9 @@ Each computer defines the same scene names but its own `mode`, topology, and loc
 
 ```json
 "displayRouting": {
+  "monitors": [
+    { "monitor": "benq-xl2420t", "host": "Mac" }
+  ],
   "inputs": [
     { "id": "DELL U2720Q", "input": 17 }
   ],
@@ -89,7 +133,8 @@ Each computer defines the same scene names but its own `mode`, topology, and loc
 }
 ```
 
-- `inputs` sends MCCS VCP `0x60` to matching physical monitors. Use `*` for the default/first monitor.
+- `monitors` is the desk-level form: "monitor M shows computer H". It is resolved against the root `monitors` table, and the DDC command is sent to whichever computer currently drives that monitor, so the same scene works from any machine. This is what the settings window writes.
+- `inputs` is the older, machine-local form: it sends MCCS VCP `0x60` from *this* computer to matching physical monitors. Use `*` for the default/first monitor. Still supported, and applied before `monitors`.
 - `wakeDisplays` or `sleepDisplays` controls all displays on that computer as an auto-input-detection fallback; they are mutually exclusive.
 - `settleDelayMs` waits after routing before the coordinated restart (`0`–`10000`).
 - Windows IDs are physical description substrings or logical display names; Linux IDs are ddcutil display numbers or `bus:N`; macOS IDs are m1ddc indexes/UUIDs.

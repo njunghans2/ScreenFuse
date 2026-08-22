@@ -192,7 +192,7 @@ internal sealed class SelfUpdater(IHydraProfile profile, ILogger<SelfUpdater> lo
             return;
         }
 
-        ProcessRestart.Restart();
+        ProcessRestart.Restart("update installed");
     }
 
     private static void Cleanup()

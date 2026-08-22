@@ -40,6 +40,13 @@ public enum MessageKind : byte
     LockScreen = 30,            // master → slave: lock the screen
     ActivityPing = 31,          // either direction: poke idle timer; master re-broadcasts to other slaves if syncScreensaver
     SceneActivate = 32,         // master → all agents: apply display routing and restart into named profile
+    DeskInventory = 33,         // any → controller: my screens and the monitors I can reach over DDC
+    DeskSetInput = 34,          // controller → peer: switch this monitor's input (only the peer that
+                                //   currently drives a monitor can command it, so switching is delegated)
+    DeskSetInputResult = 35,    // peer → controller: how the delegated switch went
+    DeskState = 36,             // controller → all: the merged desk, so every settings window shows the same picture
+    DeskCommand = 37,           // any → controller: a desk action requested from another computer's settings window
+    DeskConfigPush = 38,        // controller → all: the shared desk document (arrangement, monitors, scenes)
 }
 
 public record MouseMoveMessage(string Screen, int X, int Y);
@@ -83,6 +90,29 @@ public record OsdMessage(string Text);
 public record FileTransferBusyMessage;
 public record ActivityPingMessage;
 public record SceneActivateMessage(string Scene);
+
+// -- desk --
+// A monitor one host can currently reach over DDC. CurrentInput is the input code that selects
+// that host, learned by reading the monitor back while the host is the active source.
+public record DeskMonitorReport(string DdcId, string Description, int? CurrentInput);
+// A screen the host's display server reports, so the desk can place monitors that answer no DDC.
+public record DeskScreenReport(string ScreenId, string? Output, string? DisplayName, int X, int Y, int Width, int Height);
+public record DeskInventoryMessage(List<DeskMonitorReport> Monitors, List<DeskScreenReport> Screens);
+public record DeskSetInputMessage(string RequestId, string DdcId, int Input);
+public record DeskSetInputResultMessage(string RequestId, bool Success, string? Detail);
+public record DeskStateMonitor(
+    string Id, string Label, int DeskX, int DeskY, int Width, int Height,
+    string? ActiveHost, List<DeskStateSource> Sources);
+public record DeskStateSource(string Host, int? Input, bool Reachable);
+public record DeskStateMessage(
+    string Controller, List<string> Hosts, List<string> ConnectedHosts,
+    List<DeskStateMonitor> Monitors, List<string> Scenes, string? CurrentScene);
+public enum DeskCommandKind : byte { SetMonitorHost = 1, SetController = 2, SaveScene = 3, ActivateScene = 4, ProbeInput = 5, SaveArrangement = 6, DeleteScene = 7 }
+public record DeskArrangementEntry(string Monitor, int DeskX, int DeskY, int Width, int Height, string? Label);
+public record DeskCommandMessage(
+    DeskCommandKind Kind, string? Monitor = null, string? Host = null, string? Scene = null,
+    int? Input = null, List<DeskArrangementEntry>? Arrangement = null);
+public record DeskConfigPushMessage(string Json);
 
 public static class MessageSerializer
 {

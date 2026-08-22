@@ -28,6 +28,9 @@ internal sealed class TrayApplication : Application
     private SettingsWindow? _settings;
     private OnboardingWindow? _onboardingWindow;
     private DispatcherTimer? _statusTimer;
+    private NativeMenuItem? _controlMenu;
+    private Hydra.Desk.IDeskService? _desk;
+    private string _controlSignature = "";
 
     internal static void Run(IServiceProvider? services, string configPath, bool setupOnly = false, string? initialStatus = null, bool onboarding = false)
     {
@@ -42,8 +45,12 @@ internal sealed class TrayApplication : Application
     internal static void RequestShutdown() => Dispatcher.UIThread.Post(() =>
         (Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Shutdown());
 
+    // ShowInDock=false is what actually keeps ScreenFuse out of the macOS Dock and app switcher.
+    // LSUIElement in Info.plist only applies when the binary is launched as a bundle, which is not
+    // the case for a plain unzip or a launchd job pointing straight at the executable.
     private static AppBuilder Build() => AppBuilder.Configure<TrayApplication>()
         .UsePlatformDetect()
+        .With(new MacOSPlatformOptions { ShowInDock = false })
         .LogToTrace();
 
     public override void Initialize()
@@ -60,21 +67,21 @@ internal sealed class TrayApplication : Application
         var menu = new NativeMenu();
         var coordinator = _services?.GetService<ISceneCoordinator>();
         var profile = _services?.GetService<IHydraProfile>();
+        var desk = _services?.GetService<Hydra.Desk.IDeskService>();
         if (coordinator != null)
         {
-            var peerStatus = new NativeMenuItem($"Peers: {coordinator.ConnectedPeers.Count}/{coordinator.ExpectedPeers.Count} connected") { IsEnabled = false };
+            var peerStatus = new NativeMenuItem(PeerSummary(coordinator)) { IsEnabled = false };
             menu.Add(peerStatus);
             _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             _statusTimer.Tick += (_, _) =>
             {
-                peerStatus.Header = $"Peers: {coordinator.ConnectedPeers.Count}/{coordinator.ExpectedPeers.Count} connected";
+                peerStatus.Header = PeerSummary(coordinator);
                 if (_tray != null)
-                    _tray.ToolTipText = $"ScreenFuse — {coordinator.CurrentScene ?? "automatic"} — {coordinator.ConnectedPeers.Count}/{coordinator.ExpectedPeers.Count} peers";
+                    _tray.ToolTipText = $"ScreenFuse — {coordinator.CurrentScene ?? "automatic"} — {PeerSummary(coordinator)}";
+                RefreshControlMenu();
             };
             _statusTimer.Start();
             desktop.Exit += (_, _) => _statusTimer?.Stop();
-            if (profile?.Mode == Mode.Slave)
-                menu.Add(new NativeMenuItem("Scene switching is controlled by the master") { IsEnabled = false });
             menu.Add(new NativeMenuItemSeparator());
             foreach (var scene in coordinator.AvailableScenes)
             {
@@ -94,6 +101,18 @@ internal sealed class TrayApplication : Application
                 };
                 menu.Add(item);
             }
+            menu.Add(new NativeMenuItemSeparator());
+        }
+
+        // Taking the keyboard back has to be reachable from the computer you are actually sitting
+        // at, in one click — that is the whole point of the role being switchable.
+        if (desk != null)
+        {
+            var control = new NativeMenuItem("Keyboard and mouse") { Menu = new NativeMenu() };
+            menu.Add(control);
+            _controlMenu = control;
+            _desk = desk;
+            RefreshControlMenu();
             menu.Add(new NativeMenuItemSeparator());
         }
 
@@ -123,11 +142,12 @@ internal sealed class TrayApplication : Application
         menu.Add(startup);
         menu.Add(new NativeMenuItemSeparator());
         var restart = new NativeMenuItem("Restart ScreenFuse");
-        restart.Click += (_, _) => ProcessRestart.Restart();
+        restart.Click += (_, _) => ProcessRestart.Restart("requested from the tray menu");
         menu.Add(restart);
         var quit = new NativeMenuItem("Quit ScreenFuse");
         quit.Click += (_, _) =>
         {
+            _tray!.IsVisible = false;
             _services?.GetService<IHostApplicationLifetime>()?.StopApplication();
             desktop.Shutdown();
         };
@@ -149,12 +169,60 @@ internal sealed class TrayApplication : Application
         base.OnFrameworkInitializationCompleted();
     }
 
+    // The desk only settles once the peers report in, so the list is rebuilt when it actually
+    // changes rather than on every tick — recreating native menu items under an open menu is what
+    // makes tray menus flicker and drop clicks.
+    private void RefreshControlMenu()
+    {
+        if (_controlMenu?.Menu is not { } items || _desk == null) return;
+        var snapshot = _desk.Snapshot;
+        var signature = $"{snapshot.Controller}|{string.Join(',', snapshot.Hosts)}|{string.Join(',', snapshot.ConnectedHosts)}";
+        if (signature == _controlSignature) return;
+        _controlSignature = signature;
+
+        items.Items.Clear();
+        foreach (var host in snapshot.Hosts)
+        {
+            var isController = host.Equals(snapshot.Controller, StringComparison.OrdinalIgnoreCase);
+            var reachable = isController
+                || host.Equals(snapshot.LocalHost, StringComparison.OrdinalIgnoreCase)
+                || snapshot.ConnectedHosts.Contains(host, StringComparer.OrdinalIgnoreCase);
+            var item = new NativeMenuItem(host == snapshot.LocalHost ? $"{host} (this computer)" : host)
+            {
+                IsChecked = isController,
+                IsEnabled = reachable && !isController,
+            };
+            var target = host;
+            item.Click += async (_, _) =>
+            {
+                var result = await _desk.SetControllerAsync(target);
+                if (!result.Accepted) ShowSettings(result.Message);
+            };
+            items.Items.Add(item);
+        }
+    }
+
+    // A desk with no configured peers has nothing to count against, so a bare "1/0" is worse than
+    // saying what is actually true. Only show the fraction once the desk expects specific computers.
+    private static string PeerSummary(ISceneCoordinator coordinator)
+    {
+        var connected = coordinator.ConnectedPeers.Count;
+        if (coordinator.ExpectedPeers.Count > 0)
+            return $"Peers: {connected}/{coordinator.ExpectedPeers.Count} connected";
+        return connected switch
+        {
+            0 => "No other computer connected",
+            1 => "1 computer connected",
+            _ => $"{connected} computers connected",
+        };
+    }
+
     private void ShowSettings(string? message = null)
     {
         _settings ??= new SettingsWindow(
             _configPath,
             _services?.GetService<IDisplayRouter>(),
-            _services?.GetService<ISceneCoordinator>(),
+            _services?.GetService<Hydra.Desk.IDeskService>(),
             message,
             RestartAfterSave);
         if (message != null) _settings.SetStatus(message);
@@ -175,7 +243,7 @@ internal sealed class TrayApplication : Application
     {
         if (!_setupOnly)
         {
-            ProcessRestart.Restart();
+            ProcessRestart.Restart("settings saved");
             return;
         }
 

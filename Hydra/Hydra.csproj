@@ -1,7 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <OutputType>Exe</OutputType>
+        <!-- A tray agent must not own a console window: with a plain Exe, Windows opens one at launch
+             and closing it kills ScreenFuse. The command-line entry points re-attach to the calling
+             console themselves (see ConsoleAttach), so scene switching from a shell still prints. -->
+        <OutputType>WinExe</OutputType>
         <TargetFramework>net10.0</TargetFramework>
         <LangVersion>13</LangVersion>
         <ImplicitUsings>enable</ImplicitUsings>

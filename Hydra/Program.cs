@@ -4,6 +4,7 @@ using Cathedral.Extensions;
 using Cathedral.Logging;
 using Cathedral.Utils;
 using Hydra.Config;
+using Hydra.Desk;
 using Hydra.Display;
 using Hydra.Discovery;
 using Hydra.FileTransfer;
@@ -20,8 +21,13 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
+// Command-line runs need the console that launched them; the tray agent has none by design.
+if (args.Any(a => a is "--doctor" or "--scene" or "--install" or "--uninstall" or "--version"))
+    ConsoleAttach.ToParent();
+
 // ensure console can display non-ASCII characters (e.g. '€', 'ø') in debug logs
-Console.OutputEncoding = Encoding.UTF8;
+try { Console.OutputEncoding = Encoding.UTF8; }
+catch (IOException) { /* no console attached — nothing to configure */ }
 
 // catch unhandled exceptions on any thread before they silently kill the process
 AppDomain.CurrentDomain.UnhandledException += (_, e) =>
@@ -189,6 +195,16 @@ if (selectedScene != null)
         config = selected;
     else if (configFile.Profile == null)
         Console.Error.WriteLine($"Ignoring stale ScreenFuse scene '{selectedScene}' — no matching profile exists.");
+}
+
+// control can be handed to another computer without editing any scene, so an override taken by hand
+// wins over the controller the active scene names — the same shape as the scene override above.
+var controllerStore = new ControllerOverrideStore(configPath);
+if (controllerStore.Read() is { } controllerOverride && config != null && !string.Equals(config.Controller, controllerOverride, StringComparison.OrdinalIgnoreCase))
+{
+    var index = profiles.IndexOf(config);
+    config = config.WithController(controllerOverride);
+    if (index >= 0) profiles[index] = config;
 }
 
 // derive network config blob after the persisted scene override has selected the active profile
@@ -420,6 +436,11 @@ if (config != null)
     services.AddSingleton<IActivityTracker, ActivityTracker>();
     services.AddSingleton<ISceneCoordinator, SceneCoordinator>();
     services.AddHostedService(sp => (SceneCoordinator)sp.GetRequiredService<ISceneCoordinator>());
+    services.AddSingleton(configFile);
+    services.AddSingleton(new DeskConfigStore(configPath));
+    services.AddSingleton(controllerStore);
+    services.AddSingleton<IDeskService, DeskService>();
+    services.AddHostedService(sp => (DeskService)sp.GetRequiredService<IDeskService>());
     if (profile.Mode == Mode.Master && configFile.Profile == null)
         services.AddHostedService(sp => new SceneControlServer(
             sp.GetRequiredService<ISceneCoordinator>(),
@@ -464,6 +485,10 @@ else
     await app.WaitForShutdownAsync();
 await app.StopAsync();
 processLock?.Dispose();
+// Quitting from the tray has to leave nothing behind. A native event tap or message loop running on
+// a foreground thread would otherwise keep the process alive — and visible in the macOS app switcher
+// — long after the icon is gone.
+Environment.Exit(Environment.ExitCode);
 
 // creates the platform-specific network detector for use before DI is set up
 static async Task<INetworkDetector> CreateDetector(MacNetworkState? macNetworkState, IServiceCollection logServices)

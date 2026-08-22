@@ -15,6 +15,8 @@ public interface IHydraProfile
     // active profile settings
     string? ProfileName { get; }
     Mode Mode { get; }
+    string? Controller { get; }
+    List<DeskMonitorConfig> Monitors { get; }
     List<HostConfig> Hosts { get; }
     List<ScreenDefinition> ScreenDefinitions { get; }
     decimal? MouseScale { get; }
@@ -45,7 +47,9 @@ public class HydraProfile(HydraConfigFile configFile, HydraConfig? activeProfile
     public bool DebugMouse { get; } = configFile.DebugMouse;
 
     public string? ProfileName => _activeProfile?.ProfileName;
-    public Mode Mode => _activeProfile?.Mode ?? Mode.Slave;
+    public Mode Mode => _activeProfile?.ResolveMode(Name) ?? Mode.Slave;
+    public string? Controller => _activeProfile?.Controller;
+    public List<DeskMonitorConfig> Monitors { get; } = configFile.Monitors;
     public List<HostConfig> Hosts => _activeProfile?.Hosts ?? [];
     public List<ScreenDefinition> ScreenDefinitions => _activeProfile?.ScreenDefinitions ?? [];
     public decimal? MouseScale => _activeProfile?.MouseScale;

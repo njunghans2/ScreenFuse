@@ -8,11 +8,19 @@ internal static partial class ProcessRestart
 {
     private static readonly Toggle Restarting = new(); // one-shot latch — restart already initiated
 
-    internal static void Restart()
+    internal static void Restart() => Restart(null);
+
+    // The reason is written to the agent log before anything else happens. Under launchd's KeepAlive
+    // a crash and a deliberate restart look identical from the outside, so the absence of this line
+    // in the log is what tells you ScreenFuse died rather than chose to come back.
+    internal static void Restart(string? reason)
     {
         // one restart only — a racing caller (NetworkWatcher + SelfUpdater, or an event burst) must not
         // spawn a second process (Windows) before Environment.Exit runs
         if (!Restarting.TrySet()) return;
+
+        try { Console.Error.WriteLine($"[screenfuse] restarting: {reason ?? "unspecified"}"); }
+        catch (IOException) { /* no console attached */ }
 
         var exePath = Environment.ProcessPath!;
 

@@ -23,6 +23,26 @@ internal static class WindowsDdc
         finally { Close(monitors); }
     }
 
+    // Physical monitors this machine is the active source for. Windows drops a monitor from the
+    // enumeration once it switches to another input, so this doubles as "who can I still command".
+    internal static IReadOnlyList<PhysicalMonitorInfo> Inventory()
+    {
+        if (!OperatingSystem.IsWindows()) return [];
+        var monitors = Enumerate();
+        try
+        {
+            return monitors
+                .Select(m => new PhysicalMonitorInfo(m.LogicalName, m.Description, m.LogicalName, ReadInput(m.Handle)))
+                .ToList();
+        }
+        finally { Close(monitors); }
+    }
+
+    private static int? ReadInput(nint handle) =>
+        GetVCPFeatureAndVCPFeatureReply(handle, InputSelectVcp, out _, out var current, out _)
+            ? (int)(current & 0xff)
+            : null;
+
     internal static DisplayCommandResult SetInput(string id, int input)
     {
         var monitors = Enumerate();
@@ -110,6 +130,8 @@ internal static class WindowsDdc
     private static extern bool DestroyPhysicalMonitor(nint monitor);
     [DllImport("dxva2.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetVCPFeature(nint monitor, byte code, uint value);
+    [DllImport("dxva2.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetVCPFeatureAndVCPFeatureReply(nint monitor, byte code, out uint type, out uint current, out uint maximum);
     [DllImport("user32.dll", EntryPoint = "SendNotifyMessageW", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SendNotifyMessageW(nint hwnd, uint message, nuint wParam, nint lParam);
 #pragma warning restore SYSLIB1054

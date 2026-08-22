@@ -34,7 +34,7 @@ public class SceneCoordinatorTests
             var store = new SceneOverrideStore(Path.Combine(dir, "screenfuse.conf"));
             var restarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var coordinator = new SceneCoordinator([active, target], profile, router, relay, store,
-                NullLogger<SceneCoordinator>.Instance, () => restarted.SetResult(), TimeSpan.Zero);
+                NullLogger<SceneCoordinator>.Instance, desk: null, () => restarted.SetResult(), TimeSpan.Zero);
             await coordinator.StartAsync(CancellationToken.None);
             await relay.FirePeersChanged("peer");
 
@@ -64,5 +64,9 @@ public class SceneCoordinatorTests
         }
         public Task<IReadOnlyList<DisplayCommandResult>> DoctorAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<DisplayCommandResult>>([]);
+        public Task<IReadOnlyList<PhysicalMonitorInfo>> InventoryAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<PhysicalMonitorInfo>>([]);
+        public Task<DisplayCommandResult> SetInputAsync(string id, int input, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new DisplayCommandResult($"set {id} input {input}", true));
     }
 }

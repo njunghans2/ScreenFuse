@@ -12,6 +12,39 @@ public class HostConfig
     public int? DeadCorners { get; init; }  // pixel dead zone at screen corners; overrides root-level setting
 }
 
+// One physical monitor on the desk, as arranged in the settings window. Position and size are in
+// desk coordinates — the shared physical layout, independent of which computer currently drives it.
+// Sources record how each computer reaches this monitor: the DDC input that selects it, the id its
+// DDC helper answers to, and the name its screen detector reports.
+public class DeskMonitorConfig
+{
+    public required string Id { get; init; }
+    public string? Label { get; init; }
+    public int DeskX { get; init; }
+    public int DeskY { get; init; }
+    public int Width { get; init; }
+    public int Height { get; init; }
+    public List<MonitorSourceConfig> Sources { get; init; } = [];
+
+    public MonitorSourceConfig? Source(string host) => Sources.FirstOrDefault(s => s.Host.EqualsIgnoreCase(host));
+    public string Display => string.IsNullOrWhiteSpace(Label) ? Id : Label!;
+}
+
+public class MonitorSourceConfig
+{
+    public required string Host { get; init; }
+    public int? Input { get; init; }      // VCP 0x60 value that selects this host on the monitor
+    public string? DdcId { get; init; }   // identifier this host's DDC helper answers to
+    public string? ScreenId { get; init; } // identifier this host's screen detector reports
+}
+
+// Which computer a scene puts on a given monitor.
+public class MonitorAssignmentConfig
+{
+    public required string Monitor { get; init; }
+    public required string Host { get; init; }
+}
+
 public class NeighbourConfig
 {
     public required Direction Direction { get; init; }
@@ -64,15 +97,30 @@ public class MonitorInputConfig
 public class DisplayRoutingConfig
 {
     public List<MonitorInputConfig> Inputs { get; init; } = [];
+    // Desk-level assignments — "monitor M shows computer H". Resolved against the root monitor
+    // table into per-host DDC commands, so the same scene works from whichever computer runs it.
+    public List<MonitorAssignmentConfig> Monitors { get; init; } = [];
     public bool WakeDisplays { get; init; }
     public bool SleepDisplays { get; init; }
     public int SettleDelayMs { get; init; } = 500;
+
+    public string? HostFor(string monitorId) =>
+        Monitors.FirstOrDefault(m => m.Monitor.EqualsIgnoreCase(monitorId))?.Host;
 }
 
 public class HydraConfig
 {
     public required Mode Mode { get; init; }
     public string? ProfileName { get; init; }  // displayed when logging which profile is active
+
+    // Name of the computer that owns the keyboard and mouse in this scene. When set it decides the
+    // role — that host runs as master, every other host as slave — so one desk document can be shared
+    // verbatim between computers and control can move without rewriting each machine's config.
+    // When null the explicit per-machine Mode above is used (legacy configs).
+    public string? Controller { get; init; }
+
+    public Mode ResolveMode(string localName) =>
+        Controller is { Length: > 0 } c ? (c.EqualsIgnoreCase(localName) ? Config.Mode.Master : Config.Mode.Slave) : Mode;
     // master only — ignored in slave mode
     public List<HostConfig> Hosts { get; init; } = [];
     // slave only — scale config is reported to master via ScreenInfoEntry, master applies it when routing to slave screens
@@ -101,6 +149,30 @@ public class HydraConfig
 
     // optional — if set, this config only activates when all specified conditions are met
     public ConfigConditions? Conditions { get; init; }
+
+    // Used when control is handed over by hand: the scene is unchanged, only who drives it.
+    public HydraConfig WithController(string controller) => new()
+    {
+        Mode = Mode,
+        ProfileName = ProfileName,
+        Controller = controller,
+        Hosts = Hosts,
+        ScreenDefinitions = ScreenDefinitions,
+        MouseScale = MouseScale,
+        RelativeMouseScale = RelativeMouseScale,
+        NetworkConfig = NetworkConfig,
+        EmbeddedStyx = EmbeddedStyx,
+        EmbeddedStyxServer = EmbeddedStyxServer,
+        HideCursor = HideCursor,
+        RemoteOnly = RemoteOnly,
+        SyncScreensaver = SyncScreensaver,
+        ScreenLockPropagation = ScreenLockPropagation,
+        AccelerateMouseWheel = AccelerateMouseWheel,
+        DeadCorners = DeadCorners,
+        DisplayRouting = DisplayRouting,
+        UnicodeKeyRepeat = UnicodeKeyRepeat,
+        Conditions = Conditions,
+    };
 
     public HostConfig? LocalHost(string resolvedName) => Hosts.FirstOrDefault(s => s.Name.EqualsIgnoreCase(resolvedName));
 
@@ -224,7 +296,7 @@ public class HydraConfig
 
         foreach (var cfg in profiles.Where(c => c.RemoteOnly))
         {
-            if (cfg.Mode != Mode.Master)
+            if (cfg.ResolveMode(resolvedName) != Mode.Master)
                 throw new InvalidOperationException("remoteOnly requires mode: Master.");
             var hasRemoteHost = cfg.Hosts.Any(h => !h.Name.EqualsIgnoreCase(resolvedName));
             if (!hasRemoteHost)
@@ -269,14 +341,33 @@ public class HydraConfig
             if (dupHost != null)
                 throw new InvalidOperationException($"hydra.conf has duplicate host name '{dupHost.Key}' in profile '{cfg.ProfileName ?? "(default)"}'.");
 
-            if (cfg.Mode == Mode.Slave && cfg.HideCursor)
-                throw new InvalidOperationException("hideCursor is master-only. Remove it from slave profiles.");
-            if (cfg.Mode == Mode.Slave && cfg.ScreenLockPropagation)
-                throw new InvalidOperationException("screenLockPropagation is master-only. Remove it from slave profiles.");
-            if (cfg.Mode == Mode.Master && cfg.MouseScale != null)
-                throw new InvalidOperationException("mouseScale is slave-only. Remove it from master profiles.");
-            if (cfg.Mode == Mode.Master && cfg.ScreenDefinitions.Count > 0)
-                throw new InvalidOperationException("screenDefinitions is slave-only. Remove it from master profiles.");
+            // A profile with a controller is a shared desk document: every computer stores the same
+            // text and reads its own role from it, so master-only and slave-only keys legitimately
+            // travel together and are simply ignored by whichever machine they do not apply to.
+            if (cfg.Controller == null)
+            {
+                if (cfg.Mode == Mode.Slave && cfg.HideCursor)
+                    throw new InvalidOperationException("hideCursor is master-only. Remove it from slave profiles.");
+                if (cfg.Mode == Mode.Slave && cfg.ScreenLockPropagation)
+                    throw new InvalidOperationException("screenLockPropagation is master-only. Remove it from slave profiles.");
+                if (cfg.Mode == Mode.Master && cfg.MouseScale != null)
+                    throw new InvalidOperationException("mouseScale is slave-only. Remove it from master profiles.");
+                if (cfg.Mode == Mode.Master && cfg.ScreenDefinitions.Count > 0)
+                    throw new InvalidOperationException("screenDefinitions is slave-only. Remove it from master profiles.");
+            }
+
+            foreach (var assignment in cfg.DisplayRouting.Monitors)
+            {
+                if (string.IsNullOrWhiteSpace(assignment.Monitor))
+                    throw new InvalidOperationException($"Profile '{cfg.ProfileName ?? "(default)"}' has a monitor assignment with an empty monitor id.");
+                if (string.IsNullOrWhiteSpace(assignment.Host))
+                    throw new InvalidOperationException($"Profile '{cfg.ProfileName ?? "(default)"}' assigns monitor '{assignment.Monitor}' to an empty computer name.");
+            }
+            var dupAssignment = cfg.DisplayRouting.Monitors
+                .GroupBy(m => m.Monitor.Trim(), StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault(g => g.Count() > 1);
+            if (dupAssignment != null)
+                throw new InvalidOperationException($"Profile '{cfg.ProfileName ?? "(default)"}' assigns monitor '{dupAssignment.Key}' more than once.");
 
             foreach (var def in cfg.ScreenDefinitions)
             {

@@ -14,13 +14,14 @@ public sealed class SceneCoordinator(
     IRelaySender relay,
     SceneOverrideStore store,
     ILogger<SceneCoordinator> log,
+    Lazy<Desk.IDeskService>? desk = null,
     Action? restart = null,
     TimeSpan? restartDelay = null) : ISceneCoordinator, IHostedService
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private string[] _peers = [];
     private int _restartScheduled;
-    private readonly Action _restart = restart ?? ProcessRestart.Restart;
+    private readonly Action _restart = restart ?? (() => ProcessRestart.Restart("scene activated"));
     private readonly TimeSpan _restartDelay = restartDelay ?? TimeSpan.FromMilliseconds(750);
 
     public string? CurrentScene => activeProfile.ProfileName;
@@ -74,6 +75,7 @@ public sealed class SceneCoordinator(
 
             log.LogInformation("Activating scene {Scene}", target.ProfileName);
             var commands = await displayRouter.ApplyAsync(target.DisplayRouting, cancellationToken);
+            await ApplyMonitorAssignmentsAsync(target, cancellationToken);
 
             if (broadcast && _peers.Length > 0)
             {
@@ -88,6 +90,26 @@ public sealed class SceneCoordinator(
         finally
         {
             _gate.Release();
+        }
+    }
+
+    // "Monitor M shows computer H" is resolved through the desk, because the DDC command has to be
+    // issued by whichever computer is currently on that monitor — not necessarily this one.
+    private async Task ApplyMonitorAssignmentsAsync(HydraConfig target, CancellationToken cancellationToken)
+    {
+        if (target.DisplayRouting.Monitors.Count == 0 || desk == null) return;
+        foreach (var assignment in target.DisplayRouting.Monitors)
+        {
+            try
+            {
+                var result = await desk.Value.SetMonitorHostAsync(assignment.Monitor, assignment.Host, cancellationToken);
+                if (!result.Accepted)
+                    log.LogWarning("Scene {Scene}: {Message}", target.ProfileName, result.Message);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                log.LogWarning(ex, "Scene {Scene}: could not put {Host} on {Monitor}", target.ProfileName, assignment.Host, assignment.Monitor);
+            }
         }
     }
 
