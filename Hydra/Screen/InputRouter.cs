@@ -678,8 +678,18 @@ public class InputRouter(
             if (st.Mouse.IsOnVirtualScreen)
                 log.LogDebug("Key: {Type}{Label} mods={Modifiers}", keyEvent.Type, label, keyEvent.Modifiers);
 
-            // consume both KeyDown and KeyUp for hotkeys so the slave never sees either half
-            var hotkeyConsumed = (keyEvent.Modifiers & LockHotkey) == LockHotkey && keyEvent.Character is 'l' or 'm' or 'c' or 'v' or 'z' or 'k';
+            // Consume only ScreenFuse control shortcuts. Copy and paste deliberately use
+            // the platform-standard shortcuts so the focused file manager remains the
+            // source/destination the user expects.
+            var hotkeyConsumed = (keyEvent.Modifiers & LockHotkey) == LockHotkey && keyEvent.Character is 'l' or 'm' or 'z' or 'k';
+            var filePasteConsumed = false;
+            if (!hotkeyConsumed && keyEvent.Type == KeyEventType.KeyDown && !keyEvent.IsRepeat)
+            {
+                if (IsStandardClipboardShortcut(keyEvent, 'c'))
+                    CaptureFocusedFileCopy(st);
+                else if (IsStandardClipboardShortcut(keyEvent, 'v'))
+                    filePasteConsumed = PasteFocusedFileCopy(st);
+            }
             // !IsRepeat: an auto-repeat of a held hotkey must not re-fire the toggle every tick
             if (hotkeyConsumed && keyEvent.Type == KeyEventType.KeyDown && !keyEvent.IsRepeat)
             {
@@ -840,13 +850,67 @@ public class InputRouter(
                 }
             }
 
-            if (!hotkeyConsumed && st.Mouse.IsOnVirtualScreen && relay.IsConnected)
+            if (!hotkeyConsumed && !filePasteConsumed && st.Mouse.IsOnVirtualScreen && relay.IsConnected)
             {
                 // repeats are master-driven: each OS auto-repeat is re-resolved (live modifier/dead-key state)
                 // and forwarded with IsRepeat set, so the slave injects the correct character every tick.
                 ForwardToVirtualScreen(st, MessageKind.KeyEvent, new KeyEventMessage(keyEvent.Type, keyEvent.Modifiers, keyEvent.Character, RemapKey(keyEvent.Key), IsRepeat: keyEvent.IsRepeat, UnicodeKeyRepeat: profile.UnicodeKeyRepeat));
             }
         });
+    }
+
+    private static bool IsStandardClipboardShortcut(KeyEvent keyEvent, char character) =>
+        char.ToLowerInvariant(keyEvent.Character ?? '\0') == character
+        && (keyEvent.Modifiers & (OperatingSystem.IsMacOS() ? KeyModifiers.Super : KeyModifiers.Control)) != 0;
+
+    private void CaptureFocusedFileCopy(LocalMasterState st)
+    {
+        if (_fileTransfer.FileTransferOngoing) return;
+        if (st.Mouse.IsOnVirtualScreen && st.Mouse.CurrentScreen != null && relay.IsConnected)
+        {
+            // Let the ordinary copy command continue to the remote application while
+            // asking its focused file manager for the selected paths.
+            relay.Send([st.Mouse.CurrentScreen.Host], MessageSerializer.Encode(
+                MessageKind.FileSelectionQuery, new FileSelectionQueryMessage()));
+            return;
+        }
+
+        if (!_selectionDetector.IsFileTransferSupported) return;
+        var result = _selectionDetector.GetSelectedPaths();
+        if (!result.FileManagerFocused)
+        {
+            // Copying text must never cause a stale file selection to hijack Paste.
+            _fileTransfer.ClearCopyBuffer();
+            return;
+        }
+
+        if (result.Paths is { Count: > 0 })
+        {
+            _fileTransfer.SetCopyBuffer(profile.Name, result.Paths);
+            var n = result.Paths.Count;
+            ShowOsd(st, $"{n} {(n == 1 ? "item" : "items")} copied");
+        }
+        else
+        {
+            _fileTransfer.ClearCopyBuffer();
+        }
+    }
+
+    private bool PasteFocusedFileCopy(LocalMasterState st)
+    {
+        if (_fileTransfer.FileTransferOngoing || !_selectionDetector.IsFileTransferSupported) return false;
+        if (_fileTransfer.GetCopyBuffer() is not { } copyBuffer) return false;
+
+        var targetHost = st.Mouse.IsOnVirtualScreen && st.Mouse.CurrentScreen != null
+            ? st.Mouse.CurrentScreen.Host
+            : profile.Name;
+        if (string.Equals(copyBuffer.SourceHost, targetHost, StringComparison.OrdinalIgnoreCase)) return false;
+
+        log.LogInformation("Paste: {Count} file(s) from {Source} → focused computer {Target}",
+            copyBuffer.Paths.Length, copyBuffer.SourceHost, targetHost);
+        if (!_fileTransfer.InitiatePaste(copyBuffer, targetHost, profile.Name, relay))
+            SendOsd(targetHost, "Open a folder before pasting files");
+        return true;
     }
 
     private void OnMouseButton(MouseButtonEvent e)

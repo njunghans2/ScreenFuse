@@ -581,13 +581,13 @@ public class FileTransferServiceTests
     }
 
     [Test]
-    public void HandleSelectionResponse_NullPaths_DoesNotUpdateBuffer()
+    public void HandleSelectionResponse_NullPaths_ClearsStaleFileBuffer()
     {
         _service.SetCopyBuffer("original-host", ["existing.txt"]);
         var msg = MessageSerializer.Decode(MessageSerializer.Encode(MessageKind.FileSelectionResponse, new FileSelectionResponseMessage(null)));
         _service.HandleSelectionResponse("other-host", msg.Bytes);
 
-        Assert.That(_service.GetCopyBuffer()?.SourceHost, Is.EqualTo("original-host"));
+        Assert.That(_service.GetCopyBuffer(), Is.Null);
     }
 
     // -- HandleBusy --

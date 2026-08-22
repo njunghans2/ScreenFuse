@@ -25,10 +25,9 @@ Download and open the ScreenFuse release on both computers. Keep both computers 
 
 1. ScreenFuse finds the other computer automatically.
 2. Check that the same six-digit code appears on both computers.
-3. On the controlling computer, choose whether the other computer is to the right, left, above, or below.
-4. Click **Codes match — connect** on both.
+3. Click **Codes match — connect** on both.
 
-ScreenFuse creates the encrypted desk, configures both computers, enables launch on sign-in, and starts. The OS may show a one-time permission or private-network firewall prompt. The pairing code is deliberately the only confirmation: without a cloud account or a pre-shared secret, that check prevents another device on the LAN from impersonating your computer.
+ScreenFuse imports the display arrangements already configured in each operating system and uses them to choose the crossing edge whenever the geometry identifies it. If two independent computers share no display anchor, the first edge is a clearly labeled best guess and can be adjusted under **Settings → Computers → Fine-tune manually**. ScreenFuse creates the encrypted desk, configures both computers, enables launch on sign-in, and starts. The OS may show a one-time permission or private-network firewall prompt. The pairing code is deliberately the only confirmation: without a cloud account or a pre-shared secret, that check prevents another device on the LAN from impersonating your computer.
 
 If no configuration exists, the native first-run window opens automatically. You can reopen setup explicitly:
 
@@ -123,10 +122,7 @@ Scene activation is fail-safe: if configured peers are disconnected, ScreenFuse 
 
 ## Clipboard and files
 
-Clipboard content synchronizes when the cursor enters another computer. File transfer uses:
-
-- `Ctrl+Alt+Super+C` to copy selected files/folders.
-- `Ctrl+Alt+Super+V` to transfer them to the computer under the cursor.
+Clipboard content synchronizes when the cursor enters another computer. Use the normal Copy and Paste shortcuts in the focused application (`Ctrl+C`/`Ctrl+V` on Windows and Linux; `⌘C`/`⌘V` on macOS). When Copy is pressed in a supported file manager, ScreenFuse records the selected files; Paste transfers them to the folder focused on the computer under the cursor. Text and other normal clipboard data keep their regular copy/paste behaviour.
 
 On Linux, first use the file manager's normal Copy command so it publishes `text/uri-list`, then use the ScreenFuse hotkeys. Received files go to Downloads (then Desktop/home as fallbacks). Transfers are streamed as compressed archives with a SHA-256 integrity check; folders and name conflicts are supported.
 

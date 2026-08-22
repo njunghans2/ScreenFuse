@@ -7,13 +7,21 @@ using System.Text.Json;
 
 namespace Hydra.Pairing;
 
+internal record PairingScreenBounds(int X, int Y, int Width, int Height);
+internal record PairingDesktopLayout(List<PairingScreenBounds> Screens)
+{
+    internal static readonly PairingDesktopLayout Empty = new([]);
+}
+
 internal record PairingBeacon(int Version, string Service, Guid InstanceId, string Host,
-    long StartedAtUnixMs, string Commitment, Guid? TargetId = null, string? PublicKey = null, string? Nonce = null);
+    long StartedAtUnixMs, string Commitment, Guid? TargetId = null, string? PublicKey = null, string? Nonce = null,
+    PairingDesktopLayout? Layout = null);
 
 internal record PairingApproval(int Version, string Service, Guid FromId, Guid ToId, string Authenticator);
 
 internal record PairingCandidate(Guid InstanceId, string Host, string LocalConfigName, string RemoteConfigName,
-    string VerificationCode, bool LocalIsMaster, string DeskName, string RelaySecret);
+    string VerificationCode, bool LocalIsMaster, string DeskName, string RelaySecret,
+    PairingDesktopLayout? LocalLayout = null, PairingDesktopLayout? RemoteLayout = null);
 
 internal static class PairingProtocol
 {
@@ -27,9 +35,10 @@ internal static class PairingProtocol
     internal static byte[] Encode(PairingApproval approval) => JsonSerializer.SerializeToUtf8Bytes(approval);
 
     internal static string CreateCommitment(Guid instanceId, string host, long startedAtUnixMs,
-        ReadOnlySpan<byte> publicKey, ReadOnlySpan<byte> nonce) =>
+        ReadOnlySpan<byte> publicKey, ReadOnlySpan<byte> nonce, PairingDesktopLayout? layout = null) =>
         Convert.ToBase64String(HashParts("screenfuse-pair-commit-v1"u8.ToArray(), instanceId.ToByteArray(),
-            Encoding.UTF8.GetBytes(host), Int64Bytes(startedAtUnixMs), publicKey.ToArray(), nonce.ToArray()));
+            Encoding.UTF8.GetBytes(host), Int64Bytes(startedAtUnixMs), publicKey.ToArray(), nonce.ToArray(),
+            LayoutBytes(layout)));
 
     internal static bool TryDecode(ReadOnlySpan<byte> bytes, out PairingBeacon? beacon)
     {
@@ -47,6 +56,7 @@ internal static class PairingProtocol
                 && beacon.PublicKey != null && beacon.Nonce != null;
             if (isCommit) return true;
             if (!isReveal || !IsBase64Length(beacon.Nonce!, 32)) return false;
+            if (!IsValidLayout(beacon.Layout)) return false;
 
             var publicKey = Convert.FromBase64String(beacon.PublicKey!);
             using var key = ECDiffieHellman.Create();
@@ -54,7 +64,7 @@ internal static class PairingProtocol
             if (consumed != publicKey.Length) return false;
             return CryptographicOperations.FixedTimeEquals(Convert.FromBase64String(beacon.Commitment),
                 Convert.FromBase64String(CreateCommitment(beacon.InstanceId, beacon.Host, beacon.StartedAtUnixMs,
-                    publicKey, Convert.FromBase64String(beacon.Nonce!))));
+                    publicKey, Convert.FromBase64String(beacon.Nonce!), beacon.Layout)));
         }
         catch (Exception ex) when (ex is JsonException or FormatException or CryptographicException or ArgumentException)
         {
@@ -81,7 +91,8 @@ internal static class PairingProtocol
     }
 
     internal static PairingCandidate Derive(Guid localId, string localHost, long localStartedAtUnixMs,
-        byte[] localPublicKey, byte[] localNonce, ECDiffieHellman localKey, PairingBeacon remote)
+        byte[] localPublicKey, byte[] localNonce, ECDiffieHellman localKey, PairingBeacon remote,
+        PairingDesktopLayout? localLayout = null)
     {
         if (remote.PublicKey == null || remote.Nonce == null)
             throw new CryptographicException("The peer has not revealed its pairing key.");
@@ -94,9 +105,9 @@ internal static class PairingProtocol
         var localFirst = localId.CompareTo(remote.InstanceId) < 0;
         var transcriptHash = localFirst
             ? HashTranscript(localId, localHost, localStartedAtUnixMs, localPublicKey, localNonce,
-                remote.InstanceId, remote.Host, remote.StartedAtUnixMs, remotePublic, remoteNonce)
+                localLayout, remote.InstanceId, remote.Host, remote.StartedAtUnixMs, remotePublic, remoteNonce, remote.Layout)
             : HashTranscript(remote.InstanceId, remote.Host, remote.StartedAtUnixMs, remotePublic, remoteNonce,
-                localId, localHost, localStartedAtUnixMs, localPublicKey, localNonce);
+                remote.Layout, localId, localHost, localStartedAtUnixMs, localPublicKey, localNonce, localLayout);
         var relaySecret = HMACSHA256.HashData(shared, Combine(transcriptHash, "relay-root"u8));
         var verification = HMACSHA256.HashData(shared, Combine(transcriptHash, "sas"u8));
         var code = BinaryPrimitives.ReadUInt32BigEndian(verification) % 1_000_000;
@@ -109,7 +120,8 @@ internal static class PairingProtocol
         var localConfigName = sameName ? $"{localHost}-{(localFirst ? "1" : "2")}" : localHost;
         var remoteConfigName = sameName ? $"{remote.Host}-{(localFirst ? "2" : "1")}" : remote.Host;
         return new PairingCandidate(remote.InstanceId, remote.Host, localConfigName, remoteConfigName,
-            code.ToString("D6"), localIsMaster, deskName, Convert.ToBase64String(relaySecret));
+            code.ToString("D6"), localIsMaster, deskName, Convert.ToBase64String(relaySecret),
+            localLayout ?? PairingDesktopLayout.Empty, remote.Layout ?? PairingDesktopLayout.Empty);
     }
 
     internal static PairingApproval CreateApproval(Guid localId, PairingCandidate candidate)
@@ -132,10 +144,20 @@ internal static class PairingProtocol
         "screenfuse-pair-approve-v1"u8.ToArray(), from.ToByteArray(), to.ToByteArray());
 
     private static byte[] HashTranscript(Guid firstId, string firstHost, long firstStarted, byte[] firstKey,
-        byte[] firstNonce, Guid secondId, string secondHost, long secondStarted, byte[] secondKey, byte[] secondNonce) =>
+        byte[] firstNonce, PairingDesktopLayout? firstLayout,
+        Guid secondId, string secondHost, long secondStarted, byte[] secondKey, byte[] secondNonce,
+        PairingDesktopLayout? secondLayout) =>
         HashParts("screenfuse-pair-transcript-v1"u8.ToArray(), firstId.ToByteArray(), Encoding.UTF8.GetBytes(firstHost),
-            Int64Bytes(firstStarted), firstKey, firstNonce, secondId.ToByteArray(), Encoding.UTF8.GetBytes(secondHost),
-            Int64Bytes(secondStarted), secondKey, secondNonce);
+            Int64Bytes(firstStarted), firstKey, firstNonce, LayoutBytes(firstLayout), secondId.ToByteArray(),
+            Encoding.UTF8.GetBytes(secondHost), Int64Bytes(secondStarted), secondKey, secondNonce,
+            LayoutBytes(secondLayout));
+
+    private static byte[] LayoutBytes(PairingDesktopLayout? layout) =>
+        JsonSerializer.SerializeToUtf8Bytes(layout ?? PairingDesktopLayout.Empty);
+
+    private static bool IsValidLayout(PairingDesktopLayout? layout) => layout == null ||
+        layout.Screens.Count <= 32 && layout.Screens.All(s => s.Width is > 0 and <= 32768
+            && s.Height is > 0 and <= 32768 && Math.Abs((long)s.X) <= 131072 && Math.Abs((long)s.Y) <= 131072);
 
     private static byte[] Int64Bytes(long value)
     {
@@ -177,6 +199,8 @@ internal sealed class PairingDiscovery : IAsyncDisposable
 {
     private readonly int _listenPort;
     private readonly int _targetPort;
+    private readonly IPAddress? _targetAddress;
+    private readonly PairingDesktopLayout _layout;
     private readonly Guid _instanceId = Guid.NewGuid();
     private readonly string _host = Environment.MachineName.Split('.')[0];
     private readonly long _startedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -200,14 +224,17 @@ internal sealed class PairingDiscovery : IAsyncDisposable
     internal event Action<PairingCandidate>? CandidateFound;
     internal event Action<PairingCandidate>? PairingCompleted;
 
-    internal PairingDiscovery(int listenPort = PairingProtocol.Port, int? targetPort = null)
+    internal PairingDiscovery(int listenPort = PairingProtocol.Port, int? targetPort = null,
+        IPAddress? targetAddress = null, PairingDesktopLayout? layout = null)
     {
         if (listenPort is < 1024 or > 65535 || targetPort is < 1024 or > 65535)
             throw new ArgumentOutOfRangeException(nameof(listenPort));
         _listenPort = listenPort;
         _targetPort = targetPort ?? listenPort;
+        _targetAddress = targetAddress;
+        _layout = layout ?? PairingDesktopLayout.Empty;
         _publicKey = _key.ExportSubjectPublicKeyInfo();
-        _commitment = PairingProtocol.CreateCommitment(_instanceId, _host, _startedAtUnixMs, _publicKey, _nonce);
+        _commitment = PairingProtocol.CreateCommitment(_instanceId, _host, _startedAtUnixMs, _publicKey, _nonce, _layout);
     }
 
     internal Task StartAsync()
@@ -271,7 +298,7 @@ internal sealed class PairingDiscovery : IAsyncDisposable
             lock (_gate)
             {
                 commit = new PairingBeacon(1, PairingProtocol.BeaconService, _instanceId, _host,
-                    _startedAtUnixMs, _commitment);
+                    _startedAtUnixMs, _commitment, Layout: _layout);
                 if (_remoteCommit != null)
                     reveal = commit with { TargetId = _remoteCommit.InstanceId,
                         PublicKey = Convert.ToBase64String(_publicKey), Nonce = Convert.ToBase64String(_nonce) };
@@ -291,6 +318,11 @@ internal sealed class PairingDiscovery : IAsyncDisposable
     private async Task SendPacketAsync(byte[] payload, CancellationToken cancellationToken)
     {
         if (_client == null) throw new InvalidOperationException("Pairing has not started.");
+        if (_targetAddress != null)
+        {
+            await _client.SendAsync(payload, new IPEndPoint(_targetAddress, _targetPort), cancellationToken);
+            return;
+        }
         await _client.SendAsync(payload, new IPEndPoint(PairingProtocol.MulticastAddress, _targetPort), cancellationToken);
         await _client.SendAsync(payload, new IPEndPoint(IPAddress.Broadcast, _targetPort), cancellationToken);
     }
@@ -329,7 +361,7 @@ internal sealed class PairingDiscovery : IAsyncDisposable
             if (beacon.TargetId != _instanceId || _remoteCommit?.InstanceId != beacon.InstanceId || _candidate != null) return;
             if (!CryptographicOperations.FixedTimeEquals(Convert.FromBase64String(_remoteCommit.Commitment),
                     Convert.FromBase64String(beacon.Commitment))) return;
-            found = PairingProtocol.Derive(_instanceId, _host, _startedAtUnixMs, _publicKey, _nonce, _key, beacon);
+            found = PairingProtocol.Derive(_instanceId, _host, _startedAtUnixMs, _publicKey, _nonce, _key, beacon, _layout);
             _candidate = found;
         }
         if (found != null) CandidateFound?.Invoke(found);

@@ -158,15 +158,27 @@ internal sealed class SettingsWindow : Window
             Spacing = 12,
             Children =
             {
-                Section("Screen layout", "Add each other computer and place it beside a computer already in the layout. The pointer crosses that shared edge."),
+                Section("Screen layout", "ScreenFuse starts from the display arrangement already configured in Windows, macOS, or Linux. Pairing chooses a matching edge automatically whenever the connected display layouts make it clear."),
                 _computerHint,
-                new Grid
+                new Expander
                 {
-                    ColumnDefinitions = new ColumnDefinitions("2*,2*,*,Auto"), ColumnSpacing = 8,
-                    Children = { HeaderCol("Computer", 0), HeaderCol("Placed next to", 1), HeaderCol("On its", 2), HeaderCol("", 3) },
+                    Header = "Fine-tune manually",
+                    Content = new StackPanel
+                    {
+                        Spacing = 8,
+                        Children =
+                        {
+                            Hint("Use this only when computers have no shared display anchor, or when you want a custom crossing edge."),
+                            new Grid
+                            {
+                                ColumnDefinitions = new ColumnDefinitions("2*,2*,*,Auto"), ColumnSpacing = 8,
+                                Children = { HeaderCol("Computer", 0), HeaderCol("Placed next to", 1), HeaderCol("On its", 2), HeaderCol("", 3) },
+                            },
+                            _peerRows,
+                            _addPeerButton,
+                        },
+                    },
                 },
-                _peerRows,
-                _addPeerButton,
             },
         });
     }

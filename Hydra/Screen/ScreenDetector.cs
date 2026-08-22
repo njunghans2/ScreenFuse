@@ -84,6 +84,15 @@ public abstract class ScreenDetector : SimpleHostedService, IScreenDetector
         if (detected.Count == 0)
             return new LocalScreenSnapshot([], []);
 
+        // Stable screen names must not depend on platform enumeration order. Pairing and
+        // settings use this same desktop order when they import the OS arrangement.
+        detected = detected
+            .OrderBy(d => d.X)
+            .ThenBy(d => d.Y)
+            .ThenBy(d => d.Width)
+            .ThenBy(d => d.Height)
+            .ToList();
+
         var minX = detected.Min(d => d.X);
         var minY = detected.Min(d => d.Y);
 

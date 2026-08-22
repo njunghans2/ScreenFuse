@@ -15,8 +15,8 @@ public class PairingProtocolTests
         var firstPort = FreeUdpPort();
         var secondPort = FreeUdpPort();
         while (secondPort == firstPort) secondPort = FreeUdpPort();
-        await using var first = new PairingDiscovery(firstPort, secondPort);
-        await using var second = new PairingDiscovery(secondPort, firstPort);
+        await using var first = new PairingDiscovery(firstPort, secondPort, IPAddress.Loopback);
+        await using var second = new PairingDiscovery(secondPort, firstPort, IPAddress.Loopback);
         var firstFound = Source<PairingCandidate>();
         var secondFound = Source<PairingCandidate>();
         var firstCompleted = Source<PairingCandidate>();
@@ -94,6 +94,16 @@ public class PairingProtocolTests
             Assert.That(PairingProtocol.TryDecode("not json"u8, out _), Is.False);
             Assert.That(PairingProtocol.TryDecode(new byte[PairingProtocol.MaxPacketBytes + 1], out _), Is.False);
         });
+    }
+
+    [Test]
+    public void PairedConfigs_UseDetectedDisplayGeometryWhenItProvidesAnEdge()
+    {
+        var local = new PairingDesktopLayout([new PairingScreenBounds(0, 0, 1920, 1080)]);
+        var remote = new PairingDesktopLayout([new PairingScreenBounds(0, 0, 1920, 1080), new PairingScreenBounds(1920, 0, 1920, 1080)]);
+        var config = PairedDeskConfig.Create("alpha", "beta", true, "desk", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), local, remote);
+
+        Assert.That(config.Profiles[0].Hosts[0].Neighbours[0].Direction, Is.EqualTo(Direction.Right));
     }
 
     [Test]

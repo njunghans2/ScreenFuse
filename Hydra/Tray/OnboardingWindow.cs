@@ -5,7 +5,6 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using Hydra.Pairing;
-using Hydra.Screen;
 
 namespace Hydra.Tray;
 
@@ -14,22 +13,15 @@ internal sealed class OnboardingWindow : Window
     private readonly string _configPath;
     private readonly Action _restartAfterSave;
     private readonly Action _openAdvanced;
-    private readonly PairingDiscovery _discovery = new();
+    private PairingDiscovery? _discovery;
     private readonly TextBlock _status = new() { Text = "Looking for another ScreenFuse computer…", TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _peerName = new() { FontSize = 22, FontWeight = FontWeight.SemiBold };
     private readonly TextBlock _code = new() { FontSize = 42, FontWeight = FontWeight.Bold, LetterSpacing = 4 };
     private readonly TextBlock _role = new() { TextWrapping = TextWrapping.Wrap };
-    private readonly ComboBox _direction = new()
-    {
-        ItemsSource = new[] { "to the right", "to the left", "above", "below" },
-        SelectedIndex = 0,
-        MinWidth = 180,
-    };
     private readonly Border _candidatePanel;
     private readonly Button _connect;
     private readonly ProgressBar _progress = new() { IsIndeterminate = true, Height = 4 };
     private PairingCandidate? _candidate;
-    private Direction _selectedDirection = Direction.Right;
     private int _finishing;
 
     internal OnboardingWindow(string configPath, Action restartAfterSave, Action openAdvanced)
@@ -50,7 +42,7 @@ internal sealed class OnboardingWindow : Window
         var notMine = new Button { Content = "Not this computer" };
         notMine.Click += (_, _) =>
         {
-            if (_candidate != null) _discovery.IgnoreCandidate(_candidate.InstanceId);
+            if (_candidate != null) _discovery?.IgnoreCandidate(_candidate.InstanceId);
             _candidate = null;
             if (_candidatePanel != null) _candidatePanel.IsVisible = false;
             _connect.IsEnabled = false;
@@ -77,11 +69,11 @@ internal sealed class OnboardingWindow : Window
                     new TextBlock { Text = "Check that this same code appears on both computers:" },
                     _code,
                     _role,
-                    new StackPanel
+                    new TextBlock
                     {
-                        Orientation = Orientation.Horizontal,
-                        Spacing = 8,
-                        Children = { new TextBlock { Text = "The other computer is", VerticalAlignment = VerticalAlignment.Center }, _direction },
+                        Text = "Screen positions are imported from the display arrangement already configured in your operating systems.",
+                        TextWrapping = TextWrapping.Wrap,
+                        Opacity = 0.78,
                     },
                     new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { _connect, notMine } },
                 },
@@ -125,18 +117,25 @@ internal sealed class OnboardingWindow : Window
             },
         };
 
-        _discovery.CandidateFound += OnCandidate;
-        _discovery.PairingCompleted += OnPairingCompleted;
         Opened += async (_, _) =>
         {
-            try { await _discovery.StartAsync(); }
+            try
+            {
+                _discovery = new PairingDiscovery(layout: CaptureDesktopLayout());
+                _discovery.CandidateFound += OnCandidate;
+                _discovery.PairingCompleted += OnPairingCompleted;
+                await _discovery.StartAsync();
+            }
             catch (Exception ex)
             {
                 _progress.IsVisible = false;
                 _status.Text = $"Automatic pairing could not start: {ex.Message}";
             }
         };
-        Closed += async (_, _) => await _discovery.DisposeAsync();
+        Closed += async (_, _) =>
+        {
+            if (_discovery != null) await _discovery.DisposeAsync();
+        };
     }
 
     private void OnCandidate(PairingCandidate candidate) => Dispatcher.UIThread.Post(() =>
@@ -147,7 +146,6 @@ internal sealed class OnboardingWindow : Window
         _role.Text = candidate.LocalIsMaster
             ? "This computer will provide the keyboard and mouse for the desk."
             : $"{candidate.Host} will provide the keyboard and mouse for the desk.";
-        _direction.IsEnabled = candidate.LocalIsMaster;
         _candidatePanel.IsVisible = true;
         _connect.IsEnabled = true;
         _progress.IsVisible = false;
@@ -160,15 +158,8 @@ internal sealed class OnboardingWindow : Window
         try
         {
             _connect.IsEnabled = false;
-            _selectedDirection = _direction.SelectedIndex switch
-            {
-                1 => Direction.Left,
-                2 => Direction.Up,
-                3 => Direction.Down,
-                _ => Direction.Right,
-            };
             _status.Text = $"Approved. Click the matching button on {_candidate.Host}…";
-            await _discovery.ApproveAsync(_candidate);
+            await (_discovery?.ApproveAsync(_candidate) ?? Task.CompletedTask);
         }
         catch (Exception ex)
         {
@@ -192,14 +183,15 @@ internal sealed class OnboardingWindow : Window
                 candidate.LocalIsMaster,
                 candidate.DeskName,
                 candidate.RelaySecret,
-                _selectedDirection);
+                candidate.LocalLayout,
+                candidate.RemoteLayout);
             await NativeSettingsPersistence.SaveAsync(config, _configPath);
             _status.Text = "Connected. Enabling launch on startup…";
             var startupEnabled = await EnableStartupAsync();
             _status.Text = startupEnabled
                 ? "Connected. ScreenFuse will launch automatically and is starting now…"
                 : "Connected. ScreenFuse is starting now; launch on startup can be enabled from the tray.";
-            await _discovery.DisposeAsync();
+            if (_discovery != null) await _discovery.DisposeAsync();
             await Task.Delay(500);
             _restartAfterSave();
         }
@@ -226,6 +218,19 @@ internal sealed class OnboardingWindow : Window
         {
             return false;
         }
+    }
+
+    private PairingDesktopLayout CaptureDesktopLayout()
+    {
+        var ordered = Screens.All
+            .Select(s => s.Bounds)
+            .OrderBy(b => b.X)
+            .ThenBy(b => b.Y)
+            .ThenBy(b => b.Width)
+            .ThenBy(b => b.Height)
+            .Select(b => new PairingScreenBounds(b.X, b.Y, b.Width, b.Height))
+            .ToList();
+        return new PairingDesktopLayout(ordered);
     }
 
     private static T At<T>(T control, int row) where T : Control { Grid.SetRow(control, row); return control; }

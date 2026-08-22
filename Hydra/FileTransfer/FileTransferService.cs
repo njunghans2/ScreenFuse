@@ -65,7 +65,10 @@ public sealed class FileTransferService : IDisposable
     {
         var msg = body.FromSaneJson<FileSelectionResponseMessage>();
         if (msg?.NotFocusedMessage != null)
+        {
+            ClearCopyBuffer();
             return msg.NotFocusedMessage;
+        }
         if (msg?.Paths is { Length: > 0 })
         {
             lock (_lock) _copyBuffer = new FileCopyState(sourceHost, msg.Paths);
@@ -73,6 +76,7 @@ public sealed class FileTransferService : IDisposable
             var n = msg.Paths.Length;
             return $"{n} {(n == 1 ? "item" : "items")} copied";
         }
+        ClearCopyBuffer();
         return "0 items selected";
     }
 
