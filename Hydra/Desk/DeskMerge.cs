@@ -65,8 +65,16 @@ public static class DeskMerge
                 var screen = MatchScreen(monitor, screens, claimedScreens);
                 if (screen != null) claimedScreens.Add(screen.ScreenId);
                 var aliases = Aliases(monitor, screen);
-                var entry = Find(working, host, monitor.DdcId, ScreenKey(screen), aliases)
-                            ?? Create(working, aliases, ref changed);
+                var entry = Find(working, host, monitor.DdcId, ScreenKey(screen), aliases);
+                if (entry == null)
+                {
+                    // A monitor this computer can talk to but cannot name, and which matches none of
+                    // its screens, cannot be placed on the desk: there is nothing to identify it by
+                    // and nothing to size it from. Inventing an entry produces a phantom monitor
+                    // beside the real one it is — better to wait until it can be recognised.
+                    if (screen == null && !aliases.Any(Names)) continue;
+                    entry = Create(working, aliases, ref changed);
+                }
                 changed |= entry.Apply(host, monitor.DdcId, ScreenKey(screen), aliases, screen, monitor.SupportedInputs);
                 Record(claims, entry.Id, new Claim(host, monitor.CurrentInput, ViaDdc: true));
             }
@@ -203,8 +211,34 @@ public static class DeskMerge
     internal static bool IsGeneric(string value)
     {
         var normalised = Normalise(value);
-        return normalised.Length < MinAliasLength || GenericNames.Contains(normalised);
+        if (normalised.Length < MinAliasLength || GenericNames.Contains(normalised)) return true;
+
+        // "Display 1", "Monitor 2", "Screen 3" — the word for the thing plus a number. It tells you
+        // nothing about which panel it is, and the number belongs to one computer's enumeration
+        // order, so it means something different on the machine next to it.
+        var withoutNumber = normalised.TrimEnd('0', '1', '2', '3', '4', '5', '6', '7', '8', '9');
+        return withoutNumber.Length != normalised.Length && GenericNames.Contains(withoutNumber);
     }
+
+    // A UUID or serial identifies the panel perfectly to the computer that issued it and says
+    // nothing to any other, so it is worth remembering as an alias but is not a name to found a
+    // monitor on — a desk built from one shows a row of hex strings beside the real monitors.
+    internal static bool IsOpaqueId(string value)
+    {
+        var trimmed = value.Trim();
+        if (trimmed.Length < 16) return false;
+        var hex = 0;
+        foreach (var c in trimmed)
+        {
+            if (c is '-' or '_' or ':') continue;
+            if (!char.IsAsciiHexDigit(c)) return false;
+            hex++;
+        }
+        return hex >= 16;
+    }
+
+    // Does this alias actually name the monitor to a human, and to another computer?
+    private static bool Names(string alias) => !IsGeneric(alias) && !IsOpaqueId(alias);
 
     // Two names describe the same panel when one contains the other: "AORUS" inside
     // "AORUSFI27QX", "BENQXL2420T" inside "BENQXL2420TDISPLAYPORT".
@@ -248,7 +282,7 @@ public static class DeskMerge
         foreach (var alias in aliases)
         {
             if (string.IsNullOrWhiteSpace(alias)) continue;
-            var score = (IsGeneric(alias) ? -1000 : 0) + alias.Trim().Length;
+            var score = (IsGeneric(alias) ? -1000 : 0) + (IsOpaqueId(alias) ? -500 : 0) + alias.Trim().Length;
             if (score <= bestScore) continue;
             bestScore = score;
             best = alias.Trim();

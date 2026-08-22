@@ -91,6 +91,10 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         return Task.CompletedTask;
     }
 
+    // Runs exactly one round. Lets a test drive two desks against each other without waiting out
+    // the loop interval — the two-computer handshake is where the mistakes have actually been.
+    internal Task PumpAsync(CancellationToken cancel = default) => Execute(cancel);
+
     protected override async Task Execute(CancellationToken cancel)
     {
         await RefreshPeersAsync();
@@ -809,10 +813,17 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             var local = _store.Load();
             var merged = DeskConfigStore.Merge(local, incoming);
             if (DeskConfigStore.SameDesk(local, merged)) return;
-            // The restart below reads this file back, so it has to be on disk first.
+            // A restart would read this file back, so it has to be on disk first either way.
             await _store.SaveAsync(merged);
             _config = merged;
-            _log.LogInformation("Desk settings updated by {Host}; restarting to apply them", sourceHost);
+
+            if (DeskConfigStore.SameRuntime(local, merged))
+            {
+                _log.LogDebug("Desk updated by {Host}", sourceHost);
+                Changed?.Invoke();
+                return;
+            }
+            _log.LogInformation("Desk layout or control changed by {Host}; restarting to apply it", sourceHost);
             ScheduleRestart();
         }
         catch (Exception ex) { _log.LogWarning(ex, "Ignoring an unusable desk document from {Host}", sourceHost); }

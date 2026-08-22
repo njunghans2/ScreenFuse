@@ -115,6 +115,24 @@ A monitor showing another computer's input usually disappears from the local enu
 
 Install the DDC helper on every computer that should be able to switch monitors — `brew install m1ddc` on macOS (Apple Silicon), `sudo apt install ddcutil` on Linux; Windows needs nothing. A computer without one still appears on the desk and can still be switched *to*; it simply cannot learn its own input codes or issue a switch itself.
 
+### When something has gone wrong
+
+The stored desk is what the next start builds on, so a desk that has gone wrong looks exactly like a
+bug that will not go away. Two commands exist for that:
+
+```bash
+screenfuse --reset   # move the settings aside, keeping a timestamped copy
+screenfuse --quit    # stop ScreenFuse, including instances this one did not start
+```
+
+`--reset` renames `screenfuse.conf`, `.screenfuse-scene` and `.screenfuse-controller` to
+`<name>.<timestamp>.bak` in the same directory and leaves them there, so nothing is lost. The next
+start builds the desk from scratch.
+
+`--quit` matters most on macOS, where ScreenFuse runs as a background agent with no Dock icon and so
+never appears in the Force Quit list. It cancels any pending self-restart, tells launchd to drop the
+agent, and stops every running instance. In Activity Monitor the process is named `screenfuse`.
+
 ### Switching without DDC
 
 Not every desk can switch inputs, and it does not have to. If ScreenFuse does not know the input code for the computer you pick — or the monitor refuses the switch — it hands the monitor over by **moving the signal instead of the input**: the computer that should appear is woken, the one currently on the monitor stops its video output, and the monitor's own automatic input detection follows. No DDC helper, no input codes, nothing to configure.

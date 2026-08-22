@@ -79,6 +79,44 @@ public sealed class DeskConfigStore(string configPath)
     public static bool SameDesk(HydraConfigFile a, HydraConfigFile b) =>
         Describe(a) == Describe(b);
 
+    // Whether the difference is one a restart is needed for.
+    //
+    // Most of the desk is read live: monitor positions, aliases and learned input codes change as
+    // the desk settles, and a computer that restarted for each of those would spend its life
+    // restarting — which is exactly what a peer did, bouncing every few seconds as the controller
+    // learned another code, and never staying up long enough to be any use. Only what is read once
+    // at startup counts: the crossings, who holds the keyboard, and the set of scenes.
+    public static bool SameRuntime(HydraConfigFile a, HydraConfigFile b) =>
+        DescribeRuntime(a) == DescribeRuntime(b);
+
+    private static string DescribeRuntime(HydraConfigFile file) => string.Join('|', file.Profiles
+        .OrderBy(p => p.ProfileName, StringComparer.OrdinalIgnoreCase)
+        .Select(p =>
+        {
+            // Compare mirror-expanded: a layout written with mirrors and read back with them
+            // expanded is the same layout, and treating it as a change restarts forever.
+            var hosts = p.Hosts.Select(h => new HostConfig
+            {
+                Name = h.Name,
+                DeadCorners = h.DeadCorners,
+                Neighbours = h.Neighbours.Select(n => new NeighbourConfig
+                {
+                    Direction = n.Direction, Name = n.Name, Mirror = n.Mirror,
+                    SourceScreen = n.SourceScreen, DestScreen = n.DestScreen,
+                    SourceStart = n.SourceStart, SourceEnd = n.SourceEnd,
+                    DestStart = n.DestStart, DestEnd = n.DestEnd,
+                }).ToList(),
+            }).ToList();
+            HydraConfig.ExpandMirrors(hosts);
+
+            var edges = hosts
+                .SelectMany(h => h.Neighbours.Select(n =>
+                    $"{h.Name}>{n.Direction}>{n.Name}>{n.SourceScreen}>{n.DestScreen}".ToLowerInvariant()))
+                .Distinct()
+                .OrderBy(s => s, StringComparer.Ordinal);
+            return $"{p.ProfileName}/{p.Controller}/{string.Join(',', edges)}";
+        }));
+
     private static string Describe(HydraConfigFile file) => string.Join('|',
         file.Monitors.OrderBy(m => m.Id, StringComparer.OrdinalIgnoreCase).Select(m =>
             $"{m.Id}@{m.DeskX},{m.DeskY},{m.Width}x{m.Height}:{string.Join(',', m.Sources.OrderBy(s => s.Host, StringComparer.OrdinalIgnoreCase).Select(s => $"{s.Host}={s.Input}"))}")

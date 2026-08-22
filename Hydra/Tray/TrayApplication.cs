@@ -148,8 +148,10 @@ internal sealed class TrayApplication : Application
         quit.Click += (_, _) =>
         {
             _tray!.IsVisible = false;
-            // On macOS the launch agent owns this process. Exiting without telling launchd just
-            // hands it a dead job to restart, which is why Quit used to put the icon straight back.
+            // Order matters. Cancel every pending self-restart first — a scene or desk change
+            // scheduled one moments ago would otherwise exec us straight back — and only then tell
+            // launchd to drop the job.
+            ProcessRestart.PreventRestarts();
             if (OperatingSystem.IsMacOS()) Platform.MacOs.AgentCommands.StopAgent();
             _services?.GetService<IHostApplicationLifetime>()?.StopApplication();
             desktop.Shutdown();

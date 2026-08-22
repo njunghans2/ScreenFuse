@@ -80,6 +80,55 @@ if (args.Contains("--setup"))
     TrayApplication.Run(null, setupPath, setupOnly: true, initialStatus: setupError, onboarding: needsOnboarding);
     return;
 }
+// Stops ScreenFuse from the command line, including instances that are not this one. ScreenFuse
+// runs as a background agent with no Dock icon, so it never appears in the macOS Force Quit list —
+// leaving no obvious way to stop it when something is wrong.
+if (args.Contains("--quit"))
+{
+    ProcessRestart.PreventRestarts();
+    if (OperatingSystem.IsMacOS()) AgentCommands.StopAgent();
+    var stopped = 0;
+    foreach (var other in System.Diagnostics.Process.GetProcesses())
+    {
+        try
+        {
+            if (other.Id == Environment.ProcessId) continue;
+            if (!other.ProcessName.Contains("screenfuse", StringComparison.OrdinalIgnoreCase)) continue;
+            other.Kill(entireProcessTree: true);
+            stopped++;
+        }
+        catch (Exception) { /* already gone, or not ours to stop */ }
+    }
+    Console.WriteLine(stopped == 0
+        ? "No other ScreenFuse process was running."
+        : $"Stopped {stopped} ScreenFuse process(es).");
+    return;
+}
+
+// Puts the settings back to nothing, keeping a copy. A desk that has gone wrong is otherwise very
+// hard to tell apart from a bug, because the stored desk is exactly what the next start builds on.
+if (args.Contains("--reset"))
+{
+    var resetPath = Environment.GetEnvironmentVariable("CONFIG") ?? HydraConfigFile.DefaultPath();
+    var directory = Path.GetDirectoryName(resetPath)!;
+    var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+    var removed = new List<string>();
+
+    foreach (var name in new[] { Path.GetFileName(resetPath), ".screenfuse-scene", ".screenfuse-controller" })
+    {
+        var path = Path.Combine(directory, name);
+        if (!File.Exists(path)) continue;
+        File.Move(path, Path.Combine(directory, $"{name}.{stamp}.bak"), overwrite: true);
+        removed.Add(name);
+    }
+
+    Console.WriteLine(removed.Count == 0
+        ? $"Nothing to reset — no settings found in {directory}."
+        : $"Reset {string.Join(", ", removed)}. A copy of each was kept as <name>.{stamp}.bak in {directory}.");
+    Console.WriteLine("Start ScreenFuse again to set the desk up from scratch.");
+    return;
+}
+
 if (args.Contains("--doctor"))
 {
     var report = await new DisplayRouter(NullLogger<DisplayRouter>.Instance).DoctorAsync();
