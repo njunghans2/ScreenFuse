@@ -39,6 +39,15 @@ internal sealed class TrayApplication : Application
         _setupOnly = setupOnly;
         _onboarding = onboarding;
         _initialStatus = initialStatus;
+
+        // Fail with the reason rather than with Avalonia's version of it. Initialising the UI off
+        // the main thread throws "IDispatcherImpl belongs to a different thread", which says nothing
+        // about the await that caused it — and under launchd the resulting crash loop is silent.
+        if (!RunMode.OnMainThread)
+            throw new InvalidOperationException(
+                $"ScreenFuse's window must start on the main thread, but is starting on thread {Environment.CurrentManagedThreadId} " +
+                $"instead of {RunMode.MainThreadId}. Something awaited before the tray started; use RunSync in Program.cs instead.");
+
         Build().StartWithClassicDesktopLifetime([], ShutdownMode.OnExplicitShutdown);
     }
 

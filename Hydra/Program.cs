@@ -189,7 +189,7 @@ while (true)
             Console.Error.WriteLine(ex.Message);
             lastConfigError = ex.Message;
         }
-        await Task.Delay(TimeSpan.FromSeconds(30));
+        Sync.Wait(Task.Delay(TimeSpan.FromSeconds(30)));
     }
 }
 
@@ -220,7 +220,7 @@ if (OperatingSystem.IsMacOS())
     var needsWifi = HydraConfig.HasSsidConditions(profiles);
     macNetworkState = new MacNetworkState();
     macShield = new MacShieldProcess(macNetworkState, needsWifi);
-    await macShield.WaitForInitialState(TimeSpan.FromSeconds(3));
+    Sync.Wait(macShield.WaitForInitialState(TimeSpan.FromSeconds(3)));
 }
 
 var builder = Host.CreateApplicationBuilder(args).DisableEventLog();
@@ -229,7 +229,7 @@ var services = builder.Services;
 services.AddEnvironmentConfiguration();
 
 // detect current network/screens and resolve which profile to use
-var detector = await CreateDetector(macNetworkState, services);
+var detector = Sync.Wait(CreateDetector(macNetworkState, services));
 HydraConfig? config;
 if (configFile.Profile != null)
     config = HydraConfig.Resolve(profiles, new ConditionState([], 1), configFile.Profile);
@@ -237,9 +237,9 @@ else if (!HydraConfig.HasConditions(profiles))
     config = profiles[0]; // single unconditional profile — no detection needed
 else
 {
-    var activeSsids = (HydraConfig.HasSsidConditions(profiles) ? await detector.GetActiveSsids() : []) ?? [];
+    var activeSsids = (HydraConfig.HasSsidConditions(profiles) ? Sync.Wait(detector.GetActiveSsids()) : []) ?? [];
     var screenCount = HydraConfig.HasScreenCountConditions(profiles) ? GetScreenCount() : 1;
-    var isPluggedIn = HydraConfig.HasPluggedInConditions(profiles) ? await detector.GetIsPluggedIn() : null;
+    var isPluggedIn = HydraConfig.HasPluggedInConditions(profiles) ? Sync.Wait(detector.GetIsPluggedIn()) : null;
     config = HydraConfig.Resolve(profiles, new ConditionState(activeSsids, screenCount, isPluggedIn));
 }
 
@@ -268,10 +268,10 @@ if (controllerStore.Read() is { } controllerOverride && config != null && !strin
 string? embeddedNetworkConfig = null;
 if (config?.EmbeddedStyx != null)
 {
-    embeddedNetworkConfig = await NetworkConfig.ComputeEmbeddedBlob(config.EmbeddedStyx.Server, config.EmbeddedStyx.Password);
+    embeddedNetworkConfig = Sync.Wait(NetworkConfig.ComputeEmbeddedBlob(config.EmbeddedStyx.Server, config.EmbeddedStyx.Password));
 }
 else if (config?.EmbeddedStyxServer != null)
-    embeddedNetworkConfig = await NetworkConfig.ComputeEmbeddedBlob($"http://localhost:{config.EmbeddedStyxServer.Port}", config.EmbeddedStyxServer.Password);
+    embeddedNetworkConfig = Sync.Wait(NetworkConfig.ComputeEmbeddedBlob($"http://localhost:{config.EmbeddedStyxServer.Port}", config.EmbeddedStyxServer.Password));
 
 var profile = new HydraProfile(configFile, config, embeddedNetworkConfig);
 services.AddSingleton<IHydraProfile>(profile);
@@ -289,7 +289,7 @@ if (logFileSetting is { } logFile)
     services.AddSereneFileLogging(logPath, c => c.MinLogLevel = profile.LogLevel);
 }
 
-var startupLog = await services.CreateLogger<HydraProfile>();
+var startupLog = Sync.Wait(services.CreateLogger<HydraProfile>());
 startupLog.LogInformation("Active profile: {ProfileName}", profile.ProfileName ?? "<none>");
 
 if (config?.EmbeddedStyxServer != null)
@@ -533,7 +533,7 @@ if (HydraConfig.HasScreenCountConditions(profiles))
     }
 }
 
-await app.StartAsync();
+Sync.Wait(app.StartAsync());
 using var trayShutdown = app.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.Register(TrayApplication.RequestShutdown);
 var canShowTray = !OperatingSystem.IsLinux() || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY"));
 if (canShowTray)
