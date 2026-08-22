@@ -10,6 +10,18 @@ namespace Hydra.Platform.Windows;
 internal static class ServiceCommands
 {
     private const string ServiceName = "ScreenFuse";
+
+    // Stopping has to go through the service manager, not the process.
+    //
+    // The service is registered to restart five seconds after any failure, and killing it counts as
+    // one — so quitting by ending the process just delays it. The service stays stopped until it is
+    // started again or the machine reboots, which is the same "quit until I come back" the macOS
+    // agent gives. Needs an elevated prompt; the caller reports it when it does not.
+    internal static bool StopService() =>
+        OperatingSystem.IsWindows() && RunSc($"stop {ServiceName}", tolerateFailure: true);
+
+    internal static bool IsInstalled() =>
+        OperatingSystem.IsWindows() && RunSc($"query {ServiceName}", tolerateFailure: true);
     private const string FirewallRule = "ScreenFuse (Private LAN)";
     private const string SasPolicyPath = @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
     private const string ProductRegistryPath = @"HKEY_LOCAL_MACHINE\SOFTWARE\ScreenFuse";

@@ -125,6 +125,11 @@ screenfuse --reset   # move the settings aside, keeping a timestamped copy
 screenfuse --quit    # stop ScreenFuse, including instances this one did not start
 ```
 
+On Windows that is `screenfuse.exe` in the folder you extracted, and `--quit` needs an
+**Administrator** prompt: ScreenFuse installs as a service registered to restart five seconds after
+any failure, so ending the process without stopping the service only delays it. On macOS the binary
+lives inside the app bundle, at `/Applications/ScreenFuse.app/Contents/MacOS/screenfuse`.
+
 `--reset` renames `screenfuse.conf`, `.screenfuse-scene` and `.screenfuse-controller` to
 `<name>.<timestamp>.bak` in the same directory and leaves them there, so nothing is lost. The next
 start builds the desk from scratch.

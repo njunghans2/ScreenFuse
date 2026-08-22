@@ -87,6 +87,14 @@ if (args.Contains("--quit"))
 {
     ProcessRestart.PreventRestarts();
     if (OperatingSystem.IsMacOS()) AgentCommands.StopAgent();
+    if (OperatingSystem.IsWindows() && ServiceCommands.IsInstalled())
+    {
+        // Ending the process is not enough: the service is registered to restart five seconds after
+        // any failure, and being killed is one.
+        Console.WriteLine(ServiceCommands.StopService()
+            ? "Stopped the ScreenFuse service."
+            : "Could not stop the ScreenFuse service — run this from an Administrator prompt, or it will start itself again in a few seconds.");
+    }
     var stopped = 0;
     foreach (var other in System.Diagnostics.Process.GetProcesses())
     {
