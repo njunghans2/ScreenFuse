@@ -120,7 +120,7 @@ public class DeskMergeTests
             new()
             {
                 Id = "benq", Label = "BenQ", Width = 1920, Height = 1080, DeskX = 4000, DeskY = 250,
-                Sources = [new MonitorSourceConfig { Host = "pc", Input = 15, DdcId = "d", ScreenId = "pc:0" }],
+                Sources = [new MonitorSourceConfig { Host = "pc", Input = 15, DdcId = "d", ScreenId = "d" }],
             },
         };
         var reports = new Dictionary<string, DeskInventoryMessage>

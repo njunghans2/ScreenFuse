@@ -16,9 +16,18 @@ internal static class WindowsDdc
         var monitors = Enumerate();
         try
         {
-            return monitors.Count == 0
-                ? [new("probe DDC/CI", false, "No physical monitors were exposed by Windows")]
-                : monitors.Select(m => new DisplayCommandResult($"monitor {m.LogicalName}", true, m.Description)).ToList();
+            if (monitors.Count == 0)
+                return [new("probe DDC/CI", false, "No physical monitors were exposed by Windows")];
+            return monitors.Select(m =>
+            {
+                var capabilities = ReadCapabilities(m.Handle);
+                var model = ModelOf(capabilities);
+                var inputs = SupportedInputs(capabilities);
+                var detail = model == null ? m.Description : $"{model} (Windows calls it '{m.Description}')";
+                if (ReadInput(m.Handle) is { } current) detail += $", on input {current}";
+                if (inputs.Count > 0) detail += $", accepts inputs {string.Join(", ", inputs)}";
+                return new DisplayCommandResult($"monitor {m.LogicalName}", true, detail);
+            }).ToList();
         }
         finally { Close(monitors); }
     }
@@ -31,11 +40,76 @@ internal static class WindowsDdc
         var monitors = Enumerate();
         try
         {
-            return monitors
-                .Select(m => new PhysicalMonitorInfo(m.LogicalName, m.Description, m.LogicalName, ReadInput(m.Handle)))
-                .ToList();
+            return monitors.Select(m =>
+            {
+                var capabilities = ReadCapabilities(m.Handle);
+                var model = ModelOf(capabilities);
+                return new PhysicalMonitorInfo(
+                    m.LogicalName,
+                    // Windows names most monitors "Generic PnP Monitor", which is useless for
+                    // recognising the same panel from another computer. The monitor's own
+                    // capabilities string carries the real model, so prefer it when there is one.
+                    model ?? m.Description,
+                    m.LogicalName,
+                    ReadInput(m.Handle),
+                    SupportedInputs(capabilities),
+                    model == null ? [m.Description] : [model, m.Description]);
+            }).ToList();
         }
         finally { Close(monitors); }
+    }
+
+    // MCCS capabilities look like: (prot(monitor)type(lcd)model(FI27Q-X)cmds(01 02)vcp(60(0F 11 12) ...))
+    internal static string? ModelOf(string? capabilities) => Section(capabilities, "model");
+
+    // The values VCP 0x60 accepts on this monitor — the inputs it actually has, straight from the
+    // monitor, so the settings window can offer real choices instead of a number box.
+    internal static IReadOnlyList<int> SupportedInputs(string? capabilities)
+    {
+        var vcp = Section(capabilities, "vcp");
+        if (vcp == null) return [];
+        var marker = vcp.IndexOf("60(", StringComparison.OrdinalIgnoreCase);
+        if (marker < 0) return [];
+        var close = vcp.IndexOf(')', marker);
+        if (close < 0) return [];
+        var values = new List<int>();
+        foreach (var token in vcp[(marker + 3)..close].Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            if (int.TryParse(token, System.Globalization.NumberStyles.HexNumber, null, out var value) && value is >= 0 and <= 255)
+                values.Add(value);
+        return values;
+    }
+
+    // Reads one balanced "name( ... )" group; nested parentheses are counted so vcp() survives.
+    private static string? Section(string? capabilities, string name)
+    {
+        if (string.IsNullOrEmpty(capabilities)) return null;
+        var start = capabilities.IndexOf(name + "(", StringComparison.OrdinalIgnoreCase);
+        if (start < 0) return null;
+        var index = start + name.Length + 1;
+        var depth = 1;
+        for (var i = index; i < capabilities.Length; i++)
+        {
+            if (capabilities[i] == '(') depth++;
+            else if (capabilities[i] == ')' && --depth == 0)
+                return capabilities[index..i].Trim();
+        }
+        return null;
+    }
+
+    private static string? ReadCapabilities(nint handle)
+    {
+        try
+        {
+            if (!GetCapabilitiesStringLength(handle, out var length) || length is 0 or > 64 * 1024) return null;
+            var buffer = new byte[length];
+            if (!CapabilitiesRequestAndCapabilitiesReply(handle, buffer, length)) return null;
+            return System.Text.Encoding.ASCII.GetString(buffer).TrimEnd('\0');
+        }
+        catch (Exception)
+        {
+            // Plenty of monitors answer VCP but refuse a capabilities request; the description stands.
+            return null;
+        }
     }
 
     private static int? ReadInput(nint handle) =>
@@ -132,6 +206,10 @@ internal static class WindowsDdc
     private static extern bool SetVCPFeature(nint monitor, byte code, uint value);
     [DllImport("dxva2.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetVCPFeatureAndVCPFeatureReply(nint monitor, byte code, out uint type, out uint current, out uint maximum);
+    [DllImport("dxva2.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCapabilitiesStringLength(nint monitor, out uint length);
+    [DllImport("dxva2.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CapabilitiesRequestAndCapabilitiesReply(nint monitor, [Out] byte[] buffer, uint length);
     [DllImport("user32.dll", EntryPoint = "SendNotifyMessageW", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SendNotifyMessageW(nint hwnd, uint message, nuint wParam, nint lParam);
 #pragma warning restore SYSLIB1054

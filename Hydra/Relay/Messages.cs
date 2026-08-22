@@ -94,16 +94,20 @@ public record SceneActivateMessage(string Scene);
 // -- desk --
 // A monitor one host can currently reach over DDC. CurrentInput is the input code that selects
 // that host, learned by reading the monitor back while the host is the active source.
-public record DeskMonitorReport(string DdcId, string Description, int? CurrentInput);
+public record DeskMonitorReport(
+    string DdcId, string Description, int? CurrentInput,
+    List<string>? Aliases = null, List<int>? SupportedInputs = null);
 // A screen the host's display server reports, so the desk can place monitors that answer no DDC.
-public record DeskScreenReport(string ScreenId, string? Output, string? DisplayName, int X, int Y, int Width, int Height);
+public record DeskScreenReport(
+    string ScreenId, string? Output, string? DisplayName, int X, int Y, int Width, int Height,
+    string? PlatformId = null);
 public record DeskInventoryMessage(List<DeskMonitorReport> Monitors, List<DeskScreenReport> Screens);
 public record DeskSetInputMessage(string RequestId, string DdcId, int Input);
 public record DeskSetInputResultMessage(string RequestId, bool Success, string? Detail);
 public record DeskStateMonitor(
     string Id, string Label, int DeskX, int DeskY, int Width, int Height,
     string? ActiveHost, List<DeskStateSource> Sources);
-public record DeskStateSource(string Host, int? Input, bool Reachable);
+public record DeskStateSource(string Host, int? Input, bool Reachable, List<int>? AvailableInputs = null);
 public record DeskStateMessage(
     string Controller, List<string> Hosts, List<string> ConnectedHosts,
     List<DeskStateMonitor> Monitors, List<string> Scenes, string? CurrentScene);

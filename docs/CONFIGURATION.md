@@ -83,25 +83,37 @@ Three things make this work, and they are all stored at the root of the config a
 ```json
 "monitors": [
   {
-    "id": "benq-xl2420t",
-    "label": "BenQ XL2420T",
-    "deskX": 1920, "deskY": 0, "width": 1920, "height": 1080,
+    "id": "aorus-fi27q-x",
+    "label": "AORUS FI27Q-X",
+    "aliases": ["AORUS FI27Q-X", "AORUS", "Generic PnP Monitor"],
+    "deskX": 1512, "deskY": 0, "width": 2560, "height": 1440,
     "sources": [
-      { "host": "NINOG", "input": 15, "ddcId": "\\\\.\\DISPLAY2", "screenId": "NINOG:1" },
-      { "host": "Mac",   "input": 17, "ddcId": "1",              "screenId": "Mac" }
+      { "host": "NINOG", "input": 15, "availableInputs": [1, 3, 15, 17], "ddcId": "\\\\.\\DISPLAY1", "screenId": "\\\\.\\DISPLAY1" },
+      { "host": "Mac",   "input": 17, "ddcId": "1", "screenId": "AORUS FI27Q-X" }
     ]
   }
 ]
 ```
 
-- `deskX`/`deskY`/`width`/`height` are desk coordinates — the physical layout, independent of which computer is currently on the monitor.
-- `sources` records how each computer reaches the monitor: `input` is the MCCS VCP `0x60` value that selects that computer, `ddcId` is the identifier that computer's DDC helper answers to, and `screenId` is the name its screen detector reports.
-- `input` values are **learned automatically**: a computer that can read a monitor over DDC is by definition looking at its own input, so the value it reads is the code that selects it. Fill one in by hand only for a computer that has never been on that monitor while ScreenFuse was running.
+- `deskX`/`deskY`/`width`/`height` are desk coordinates — the physical layout, independent of which computer is currently on the monitor. The desk never leaves two monitors overlapping.
+- `aliases` is every name any computer knows the panel by. This is what makes one monitor one monitor: Windows calls the example above "Generic PnP Monitor", the monitor's own MCCS capabilities string says "AORUS", and macOS says "AORUS FI27Q-X". Names are compared with punctuation and case removed, by containment, and names that identify nothing ("Generic PnP Monitor", "Display", "Monitor") never match anything.
+- `sources` records how each computer reaches the monitor: `input` is the MCCS VCP `0x60` value that selects that computer, `availableInputs` is the set the monitor said it accepts, `ddcId` is the identifier that computer's DDC helper answers to, and `screenId` is the name its screen detector reports.
+- `input` values are **learned automatically** where they can be. Fill one in by hand only for a computer that cannot read the monitor at all — typically because its DDC helper is not installed.
+
+### Who is on a monitor
+
+`0x60` is a property of the monitor, not of the computer asking: everyone who can read it gets the same answer, the input the monitor is showing. The desk therefore decides as follows.
+
+- **One computer can see the monitor** — it is the one being shown, so the value it reads is the code that selects it. This is how codes learn themselves.
+- **Several can see it** (a monitor that keeps inactive inputs alive, or a dock) — the value they read says which input is live, and the computer whose known code matches is the one on screen. Nothing new is learned, because the reading no longer identifies the reader.
+- **Nobody can read it over DDC** — the only computer listing it as a screen is on it.
 
 A monitor showing another computer's input usually disappears from the local enumeration entirely, which has two consequences worth knowing:
 
 - The computer that is **not** the active source generally cannot command the monitor. Switching is therefore delegated: the desk asks whichever computer currently drives a monitor to issue the DDC command.
 - The `monitors` table is the desk's memory of monitors nobody can currently see. Deleting it loses the learned input codes.
+
+Install the DDC helper on every computer that should be able to switch monitors — `brew install m1ddc` on macOS, `sudo apt install ddcutil` on Linux; Windows needs nothing. A computer without one still appears on the desk and can still be switched *to*, but only by a peer that can reach the monitor, and it can never learn its own input codes.
 
 The crossing edges in `hosts` are **derived** from the arrangement plus each scene's monitor assignments — two monitors that touch on the desk become a crossing only while different computers are on them, and the shared portion of the touching edge becomes the percentage range. Editing `hosts` by hand still works, but the settings window rewrites it whenever the arrangement changes.
 

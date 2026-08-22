@@ -104,8 +104,10 @@ internal sealed class DeskCanvas : Border
     private Control BuildTile(DeskMonitorView monitor, Rect rect)
     {
         var accent = HostColour(monitor.ActiveHost);
-        var width = Math.Max(rect.Width * _scale, 120);
-        var height = Math.Max(rect.Height * _scale, 78);
+        // Strictly proportional. Giving a tile a minimum size while positioning it at the true scale
+        // is what made monitors overlap on screen even when the desk itself was laid out correctly.
+        var width = rect.Width * _scale;
+        var height = rect.Height * _scale;
 
         var title = new TextBlock
         {
@@ -121,10 +123,10 @@ internal sealed class DeskCanvas : Border
         };
 
         Control picker;
-        var choices = monitor.Sources
-            .Where(s => s.Input != null || string.Equals(s.Host, monitor.ActiveHost, StringComparison.OrdinalIgnoreCase))
-            .Select(s => s.Host)
-            .ToList();
+        // Every computer wired to this monitor is offered, including one whose input code is not
+        // known yet: choosing it fails with the sentence that says how to teach it, which is far
+        // more use than a tile that silently offers nothing.
+        var choices = monitor.Sources.Select(s => s.Host).ToList();
         if (choices.Count > 1)
         {
             var combo = new ComboBox { ItemsSource = choices, MinWidth = 96, FontSize = 12, HorizontalAlignment = HorizontalAlignment.Stretch };
@@ -157,6 +159,7 @@ internal sealed class DeskCanvas : Border
             CornerRadius = new CornerRadius(6),
             Padding = new Thickness(8, 6),
             Cursor = new Cursor(StandardCursorType.SizeAll),
+            ClipToBounds = true,
             Child = new StackPanel { Spacing = 3, Children = { title, size, picker } },
         };
 

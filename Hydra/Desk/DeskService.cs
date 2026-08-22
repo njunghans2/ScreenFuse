@@ -112,7 +112,9 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         try
         {
             foreach (var monitor in await _router.InventoryAsync(cancel))
-                monitors.Add(new DeskMonitorReport(monitor.Id, monitor.Description, monitor.CurrentInput));
+                monitors.Add(new DeskMonitorReport(
+                    monitor.Id, monitor.Description, monitor.CurrentInput,
+                    monitor.Aliases?.ToList(), monitor.SupportedInputs?.ToList()));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -128,7 +130,8 @@ public sealed class DeskService : SimpleHostedService, IDeskService
                     screen.Identity?.ScreenName ?? screen.Name,
                     screen.Identity?.Output,
                     screen.Identity?.DisplayName,
-                    screen.X, screen.Y, screen.Width, screen.Height));
+                    screen.X, screen.Y, screen.Width, screen.Height,
+                    screen.Identity?.PlatformId));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -145,7 +148,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         await _gate.WaitAsync(cancel);
         try
         {
-            var merge = DeskMerge.Merge(_config.Monitors, _reports, _optimistic);
+            var merge = DeskMerge.Merge(_config.Monitors, _reports, _optimistic, KnownHosts());
             if (merge.ConfigChanged)
             {
                 _config = WithMonitors(_config, merge.Monitors);
@@ -166,10 +169,24 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         Changed?.Invoke();
     }
 
-    private DeskSnapshot BuildSnapshot(IReadOnlyList<DeskMonitorView> views)
+    // One spelling per computer. The relay, the config and this machine's own name do not always
+    // agree on capitalisation, and every place that compares them case-sensitively invents a peer.
+    private List<string> KnownHosts()
     {
         var hosts = new List<string> { LocalName };
-        foreach (var name in _profile.Hosts.Select(h => h.Name).Concat(_peers).Concat(views.SelectMany(v => v.Sources.Select(s => s.Host))))
+        foreach (var name in _profile.Hosts.Select(h => h.Name)
+                     .Concat(_peers)
+                     .Concat(_config.Monitors.SelectMany(m => m.Sources.Select(s => s.Host)))
+                     .Concat(_reports.Keys))
+            if (!string.IsNullOrWhiteSpace(name) && !hosts.Contains(name, StringComparer.OrdinalIgnoreCase))
+                hosts.Add(name);
+        return hosts;
+    }
+
+    private DeskSnapshot BuildSnapshot(IReadOnlyList<DeskMonitorView> views)
+    {
+        var hosts = KnownHosts();
+        foreach (var name in views.SelectMany(v => v.Sources.Select(s => s.Host)))
             if (!hosts.Contains(name, StringComparer.OrdinalIgnoreCase)) hosts.Add(name);
 
         return new DeskSnapshot(
@@ -264,22 +281,22 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         var view = _snapshot.Monitors.FirstOrDefault(m => m.Id == monitorId);
 
         if (view?.ActiveHost?.Equals(host, StringComparison.OrdinalIgnoreCase) == true)
-            return DeskActionResult.Ok($"{monitor.Display} already shows {host}.");
+            return DeskActionResult.Ok($"{monitor.DisplayName()} already shows {host}.");
 
         var target = monitor.Source(host);
         if (target?.Input == null)
             return DeskActionResult.Fail(
-                $"ScreenFuse does not know which input on {monitor.Display} shows {host}. Set it under 'How each computer is wired'.");
+                $"ScreenFuse does not know which input on {monitor.DisplayName()} shows {host}. Set it under 'How each computer is wired'.");
 
         // Only the computer currently on the monitor can talk to it, so the switch is delegated —
         // and it has to be the computer that actually reported the monitor this round, not the one
         // an earlier switch optimistically put there.
         var owner = view?.Sources.FirstOrDefault(s => s.Reachable)?.Host ?? view?.ActiveHost;
         if (string.IsNullOrWhiteSpace(owner))
-            return DeskActionResult.Fail($"No connected computer can reach {monitor.Display} right now, so its input cannot be switched.");
+            return DeskActionResult.Fail($"No connected computer can reach {monitor.DisplayName()} right now, so its input cannot be switched.");
         var ddcId = monitor.Source(owner!)?.DdcId;
         if (string.IsNullOrWhiteSpace(ddcId))
-            return DeskActionResult.Fail($"{owner} has no DDC address for {monitor.Display}.");
+            return DeskActionResult.Fail($"{owner} has no DDC address for {monitor.DisplayName()}.");
 
         var result = await SwitchAsync(owner!, ddcId!, target.Input.Value, cancel);
         if (!result.Accepted) return result;
@@ -289,7 +306,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             .Select(m => m.Id == monitorId ? m with { ActiveHost = host } : m).ToList());
         Broadcast();
         Changed?.Invoke();
-        return DeskActionResult.Ok($"{monitor.Display} switched to {host}.");
+        return DeskActionResult.Ok($"{monitor.DisplayName()} switched to {host}.");
     }
 
     private async Task<DeskActionResult> SwitchAsync(string owner, string ddcId, int input, CancellationToken cancel)
@@ -337,14 +354,14 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         var view = _snapshot.Monitors.FirstOrDefault(m => m.Id == monitorId);
         var owner = view?.Sources.FirstOrDefault(s => s.Reachable)?.Host;
         if (string.IsNullOrWhiteSpace(owner))
-            return DeskActionResult.Ok($"Saved input {input} for {host}. No computer can reach {monitor.Display} right now, so it was not tried.");
+            return DeskActionResult.Ok($"Saved input {input} for {host}. No computer can reach {monitor.DisplayName()} right now, so it was not tried.");
         var ddcId = _config.Monitor(monitorId)?.Source(owner!)?.DdcId;
         if (string.IsNullOrWhiteSpace(ddcId))
             return DeskActionResult.Ok($"Saved input {input} for {host}.");
 
         var result = await SwitchAsync(owner!, ddcId!, input, cancel);
         return result.Accepted
-            ? DeskActionResult.Ok($"Saved input {input} for {host} and switched {monitor.Display} to it — check whether {host} is on screen.")
+            ? DeskActionResult.Ok($"Saved input {input} for {host} and switched {monitor.DisplayName()} to it — check whether {host} is on screen.")
             : DeskActionResult.Ok($"Saved input {input} for {host}, but the monitor did not accept it: {result.Message}");
     }
 

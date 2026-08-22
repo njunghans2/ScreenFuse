@@ -20,6 +20,10 @@ public class DeskMonitorConfig
 {
     public required string Id { get; init; }
     public string? Label { get; init; }
+    // Every name any computer knows this monitor by. Each operating system names the same panel
+    // differently, so this list is how the desk recognises a monitor it has met before from a
+    // computer that describes it in other words.
+    public List<string> Aliases { get; init; } = [];
     public int DeskX { get; init; }
     public int DeskY { get; init; }
     public int Width { get; init; }
@@ -27,13 +31,17 @@ public class DeskMonitorConfig
     public List<MonitorSourceConfig> Sources { get; init; } = [];
 
     public MonitorSourceConfig? Source(string host) => Sources.FirstOrDefault(s => s.Host.EqualsIgnoreCase(host));
-    public string Display => string.IsNullOrWhiteSpace(Label) ? Id : Label!;
+
+    // Not a property: a computed property would be serialised into the config file as a field
+    // nobody reads and everybody wonders about.
+    public string DisplayName() => string.IsNullOrWhiteSpace(Label) ? Id : Label!;
 }
 
 public class MonitorSourceConfig
 {
     public required string Host { get; init; }
     public int? Input { get; init; }      // VCP 0x60 value that selects this host on the monitor
+    public List<int> AvailableInputs { get; init; } = []; // the codes the monitor told this host it accepts
     public string? DdcId { get; init; }   // identifier this host's DDC helper answers to
     public string? ScreenId { get; init; } // identifier this host's screen detector reports
 }

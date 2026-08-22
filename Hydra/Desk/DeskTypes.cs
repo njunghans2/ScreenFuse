@@ -13,11 +13,13 @@ public record DeskMonitorView(
     string? ActiveHost,
     IReadOnlyList<DeskSourceView> Sources)
 {
-    public bool Switchable => Sources.Count(s => s.Input != null) > 1;
+    // More than one computer is wired to it. Whether the switch can actually be carried out also
+    // needs an input code for the target, which the desk learns or the user supplies once.
+    public bool Switchable => Sources.Count > 1;
     public DeskSourceView? Source(string host) => Sources.FirstOrDefault(s => string.Equals(s.Host, host, StringComparison.OrdinalIgnoreCase));
 }
 
-public record DeskSourceView(string Host, int? Input, bool Reachable);
+public record DeskSourceView(string Host, int? Input, bool Reachable, IReadOnlyList<int>? AvailableInputs = null);
 
 public record DeskSnapshot(
     string Controller,

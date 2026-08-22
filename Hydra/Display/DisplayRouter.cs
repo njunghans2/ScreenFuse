@@ -6,7 +6,10 @@ namespace Hydra.Display;
 
 public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
 {
+    private static readonly TimeSpan InputCacheLife = TimeSpan.FromSeconds(30);
+
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly Dictionary<string, (int? Input, DateTime Read)> _inputCache = new(StringComparer.OrdinalIgnoreCase);
 
     public async Task<IReadOnlyList<DisplayCommandResult>> ApplyAsync(DisplayRoutingConfig routing, CancellationToken cancellationToken = default)
     {
@@ -52,6 +55,7 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
                 : await SetInputWithHelperAsync(new MonitorInputConfig { Id = id, Input = input }, cancellationToken);
             if (!result.Success)
                 log.LogWarning("Display command failed: {Command}: {Detail}", result.Command, result.Detail);
+            _inputCache.Remove(id); // the monitor is on a different input now, by definition
             return result;
         }
         finally { _gate.Release(); }
@@ -70,9 +74,57 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
                     ? await RunAsync("ddcutil", ["detect", "--brief"], "ddcutil detect", cancellationToken)
                     : new DisplayCommandResult("inventory", false, "Unsupported operating system");
             if (!probe.Success || string.IsNullOrWhiteSpace(probe.Detail)) return [];
-            return OperatingSystem.IsMacOS() ? ParseM1Ddc(probe.Detail) : ParseDdcutil(probe.Detail);
+            var monitors = OperatingSystem.IsMacOS() ? ParseM1Ddc(probe.Detail) : ParseDdcutil(probe.Detail);
+            return await WithCurrentInputsAsync(monitors, cancellationToken);
         }
         finally { _gate.Release(); }
+    }
+
+    // Reading the input back is what lets a computer learn the code that selects it — a computer
+    // that can talk to a monitor is by definition looking at its own input. On Windows that is an
+    // in-process call; here it costs a subprocess per monitor, so the answer is cached: the value
+    // only changes when someone switches the monitor, and then this computer loses it entirely.
+    private async Task<List<PhysicalMonitorInfo>> WithCurrentInputsAsync(List<PhysicalMonitorInfo> monitors, CancellationToken cancellationToken)
+    {
+        var result = new List<PhysicalMonitorInfo>(monitors.Count);
+        foreach (var monitor in monitors)
+        {
+            if (_inputCache.TryGetValue(monitor.Id, out var cached) && DateTime.UtcNow - cached.Read < InputCacheLife)
+            {
+                result.Add(monitor with { CurrentInput = cached.Input });
+                continue;
+            }
+            var input = await ReadInputAsync(monitor.Id, cancellationToken);
+            _inputCache[monitor.Id] = (input, DateTime.UtcNow);
+            result.Add(monitor with { CurrentInput = input });
+        }
+        return result;
+    }
+
+    private async Task<int?> ReadInputAsync(string id, CancellationToken cancellationToken)
+    {
+        DisplayCommandResult probe;
+        if (OperatingSystem.IsMacOS())
+            probe = await RunAsync("m1ddc", id == "*" ? ["get", "input"] : ["display", id, "get", "input"], "read input", cancellationToken);
+        else if (OperatingSystem.IsLinux())
+            probe = await RunAsync("ddcutil", ["getvcp", "60", "--brief", "--display", id], "read input", cancellationToken);
+        else return null;
+
+        if (!probe.Success || string.IsNullOrWhiteSpace(probe.Detail)) return null;
+        return ParseInput(probe.Detail);
+    }
+
+    // m1ddc prints just the number. ddcutil --brief prints "VCP 60 SNC x0f".
+    internal static int? ParseInput(string output)
+    {
+        var text = output.Trim();
+        if (int.TryParse(text, out var plain) && plain is >= 0 and <= 255) return plain;
+        var token = text.Split([' ', '\n', '\r', '\t'], StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+        if (token == null) return null;
+        if (token.StartsWith("x", StringComparison.OrdinalIgnoreCase)
+            && int.TryParse(token[1..], System.Globalization.NumberStyles.HexNumber, null, out var hex) && hex is >= 0 and <= 255)
+            return hex;
+        return int.TryParse(token, out var value) && value is >= 0 and <= 255 ? value : null;
     }
 
     // m1ddc display list prints one monitor per line: "[1] BenQ XL2420T (DisplayPort)".
@@ -85,7 +137,7 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
             if (!line.StartsWith('[') || close < 0) continue;
             var id = line[1..close].Trim();
             var description = line[(close + 1)..].Trim();
-            if (id.Length > 0) monitors.Add(new PhysicalMonitorInfo(id, description.Length > 0 ? description : id));
+            if (id.Length > 0) monitors.Add(new PhysicalMonitorInfo(id, description.Length > 0 ? description : id, Aliases: description.Length > 0 ? [description] : []));
         }
         return monitors;
     }
@@ -102,7 +154,7 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
             var line = raw.TrimEnd();
             if (line.StartsWith("Display ", StringComparison.OrdinalIgnoreCase))
             {
-                if (id != null) monitors.Add(new PhysicalMonitorInfo(id, description ?? id));
+                if (id != null) monitors.Add(new PhysicalMonitorInfo(id, description ?? id, Aliases: description != null ? [description] : []));
                 id = line["Display ".Length..].Trim();
                 description = null;
             }
@@ -112,7 +164,7 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
                 description = parts.Length >= 3 ? parts[2] : line.Trim();
             }
         }
-        if (id != null) monitors.Add(new PhysicalMonitorInfo(id, description ?? id));
+        if (id != null) monitors.Add(new PhysicalMonitorInfo(id, description ?? id, Aliases: description != null ? [description] : []));
         return monitors;
     }
 

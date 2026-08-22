@@ -163,21 +163,43 @@ internal sealed class DeskPanel : UserControl
         foreach (var monitor in snapshot.Monitors)
         {
             var rows = new StackPanel { Spacing = 6 };
+            // The monitor itself reports which codes VCP 0x60 accepts, so offer those by name rather
+            // than asking anyone to know that 17 means HDMI 1. Fall back to a number box only for
+            // monitors that would not say.
+            var offered = monitor.Sources
+                .SelectMany(s => s.AvailableInputs ?? [])
+                .Concat(monitor.Sources.Where(s => s.Input != null).Select(s => s.Input!.Value))
+                .Distinct()
+                .OrderBy(v => v)
+                .ToList();
+
             foreach (var host in snapshot.Hosts)
             {
                 var source = monitor.Source(host);
-                var input = new NumericUpDown
+                Control input;
+                Func<int?> read;
+                if (offered.Count > 0)
                 {
-                    Minimum = 0,
-                    Maximum = 255,
-                    Increment = 1,
-                    Value = source?.Input,
-                    MinWidth = 110,
-                };
+                    var combo = new ComboBox
+                    {
+                        ItemsSource = offered.Select(InputName).ToList(),
+                        MinWidth = 150,
+                        SelectedIndex = source?.Input is { } known ? offered.IndexOf(known) : -1,
+                    };
+                    input = combo;
+                    read = () => combo.SelectedIndex >= 0 ? offered[combo.SelectedIndex] : null;
+                }
+                else
+                {
+                    var number = new NumericUpDown { Minimum = 0, Maximum = 255, Increment = 1, Value = source?.Input, MinWidth = 150 };
+                    input = number;
+                    read = () => number.Value is { } v ? decimal.ToInt32(v) : null;
+                }
+
                 var test = SettingsWindow.Action("Try", async () =>
                 {
-                    if (input.Value is not { } value) { _status("Enter an input code first."); return; }
-                    Report(await _desk.ProbeInputAsync(monitor.Id, host, decimal.ToInt32(value)));
+                    if (read() is not { } value) { _status("Pick an input first."); return; }
+                    Report(await _desk.ProbeInputAsync(monitor.Id, host, value));
                 });
                 rows.Children.Add(new Grid
                 {
@@ -227,6 +249,25 @@ internal sealed class DeskPanel : UserControl
         Report(await _desk.SaveArrangementAsync(placements));
 
     private void Report(DeskActionResult result) => _status(result.Message);
+
+    // MCCS assigns these meanings to VCP 0x60; the code is kept in the label because a monitor's
+    // idea of "HDMI 1" and the socket printed on its back do not always agree.
+    private static string InputName(int code) => code switch
+    {
+        1 => "VGA 1 (1)",
+        2 => "VGA 2 (2)",
+        3 => "DVI 1 (3)",
+        4 => "DVI 2 (4)",
+        5 => "Composite 1 (5)",
+        7 => "S-Video 1 (7)",
+        9 => "Component 1 (9)",
+        15 => "DisplayPort 1 (15)",
+        16 => "DisplayPort 2 (16)",
+        17 => "HDMI 1 (17)",
+        18 => "HDMI 2 (18)",
+        27 => "USB-C (27)",
+        _ => $"Input {code}",
+    };
 
     private static StackPanel Header(string title, string description) => new()
     {
