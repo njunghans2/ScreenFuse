@@ -35,6 +35,22 @@ public class DeskMonitorConfig
     // Not a property: a computed property would be serialised into the config file as a field
     // nobody reads and everybody wonders about.
     public string DisplayName() => string.IsNullOrWhiteSpace(Label) ? Id : Label!;
+
+    // Copy with changes. Hand-writing the copy at each call site is how a monitor quietly loses its
+    // aliases — and with them its identity, so the next merge splits it in two again.
+    public DeskMonitorConfig With(
+        string? label = null, int? deskX = null, int? deskY = null,
+        int? width = null, int? height = null, List<MonitorSourceConfig>? sources = null) => new()
+    {
+        Id = Id,
+        Label = label ?? Label,
+        Aliases = [.. Aliases],
+        DeskX = deskX ?? DeskX,
+        DeskY = deskY ?? DeskY,
+        Width = width ?? Width,
+        Height = height ?? Height,
+        Sources = sources ?? Sources,
+    };
 }
 
 public class MonitorSourceConfig

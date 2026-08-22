@@ -68,5 +68,7 @@ public class SceneCoordinatorTests
             Task.FromResult<IReadOnlyList<PhysicalMonitorInfo>>([]);
         public Task<DisplayCommandResult> SetInputAsync(string id, int input, CancellationToken cancellationToken = default) =>
             Task.FromResult(new DisplayCommandResult($"set {id} input {input}", true));
+        public Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new DisplayCommandResult(wake ? "wake displays" : "sleep displays", true));
     }
 }

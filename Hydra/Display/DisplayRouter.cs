@@ -19,7 +19,7 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
             var results = new List<DisplayCommandResult>();
 
             if (routing.WakeDisplays)
-                results.Add(await SetDisplayPowerAsync(wake: true, cancellationToken));
+                results.Add(await SetDisplayPowerCoreAsync(wake: true, cancellationToken));
 
             foreach (var input in routing.Inputs)
             {
@@ -35,7 +35,7 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
                 await Task.Delay(routing.SettleDelayMs, cancellationToken);
 
             if (routing.SleepDisplays)
-                results.Add(await SetDisplayPowerAsync(wake: false, cancellationToken));
+                results.Add(await SetDisplayPowerCoreAsync(wake: false, cancellationToken));
 
             return results;
         }
@@ -205,7 +205,14 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
         return Task.FromResult(new DisplayCommandResult("set monitor input", false, "Unsupported operating system"));
     }
 
-    private static Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken)
+    public async Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try { return await SetDisplayPowerCoreAsync(wake, cancellationToken); }
+        finally { _gate.Release(); }
+    }
+
+    private static Task<DisplayCommandResult> SetDisplayPowerCoreAsync(bool wake, CancellationToken cancellationToken)
     {
         if (OperatingSystem.IsWindows())
             return Task.FromResult(WindowsDdc.SetAllDisplayPower(wake));

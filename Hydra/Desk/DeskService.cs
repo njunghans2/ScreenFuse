@@ -36,6 +36,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
     private readonly ConcurrentDictionary<string, DeskInventoryMessage> _reports = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<DeskSetInputResultMessage>> _pending = new();
     private readonly Dictionary<string, string> _optimistic = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _replied = new(StringComparer.OrdinalIgnoreCase);
 
     private HydraConfigFile _config;
     private string[] _peers = [];
@@ -92,6 +93,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
 
     protected override async Task Execute(CancellationToken cancel)
     {
+        await RefreshPeersAsync();
         var inventory = await BuildInventoryAsync(cancel);
         if (IsController)
         {
@@ -102,6 +104,51 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         {
             await SendToControllerAsync(MessageSerializer.Encode(MessageKind.DeskInventory, inventory));
         }
+    }
+
+    // The peer list cannot come from the PeersChanged event alone. This service is constructed after
+    // the relay connection, so on a desk whose peers connect early the event has already fired by
+    // the time anything here is listening — and then it never fires again, because nothing changes.
+    // The controller would sit with an empty peer list forever: no desk state broadcast, no config
+    // pushed, and every other computer stuck on "waiting for the computers to report their screens".
+    private async Task RefreshPeersAsync()
+    {
+        var known = new List<string>(_peers);
+        void Note(string? host)
+        {
+            if (!string.IsNullOrWhiteSpace(host)
+                && !host.Equals(LocalName, StringComparison.OrdinalIgnoreCase)
+                && !known.Contains(host, StringComparer.OrdinalIgnoreCase))
+                known.Add(host);
+        }
+
+        // Anyone who has sent us a desk message is demonstrably reachable, whatever the event said.
+        foreach (var host in _reports.Keys) Note(host);
+        foreach (var host in _replied) Note(host);
+        try
+        {
+            if (IsController) foreach (var host in (await _world.GetPeerScreensSnapshot()).Keys) Note(host);
+            else foreach (var host in await _world.GetMasters()) Note(host);
+        }
+        catch (Exception ex) { _log.LogDebug(ex, "Could not read the relay's peer list"); }
+
+        var added = known.Except(_peers, StringComparer.OrdinalIgnoreCase).ToArray();
+        if (added.Length == 0) return;
+        _peers = [.. known];
+        Greet(added);
+    }
+
+    // A computer that has just become visible needs the desk document before its settings window can
+    // show anything, and the current desk state so it does not sit on a placeholder for four seconds.
+    private void Greet(string[] added)
+    {
+        if (!IsController || added.Length == 0) return;
+        try
+        {
+            Send(added, MessageSerializer.Encode(MessageKind.DeskConfigPush, new DeskConfigPushMessage(_store.Serialize(_config))));
+            Broadcast();
+        }
+        catch (Exception ex) { _log.LogDebug(ex, "Could not send the desk to {Peers}", string.Join(", ", added)); }
     }
 
     // -- inventory -------------------------------------------------------------------------------
@@ -283,22 +330,23 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         if (view?.ActiveHost?.Equals(host, StringComparison.OrdinalIgnoreCase) == true)
             return DeskActionResult.Ok($"{monitor.DisplayName()} already shows {host}.");
 
-        var target = monitor.Source(host);
-        if (target?.Input == null)
-            return DeskActionResult.Fail(
-                $"ScreenFuse does not know which input on {monitor.DisplayName()} shows {host}. Set it under 'How each computer is wired'.");
-
-        // Only the computer currently on the monitor can talk to it, so the switch is delegated —
-        // and it has to be the computer that actually reported the monitor this round, not the one
-        // an earlier switch optimistically put there.
+        // The computer that actually reported the monitor this round is the one that can command it,
+        // not the one an earlier switch optimistically put there.
         var owner = view?.Sources.FirstOrDefault(s => s.Reachable)?.Host ?? view?.ActiveHost;
-        if (string.IsNullOrWhiteSpace(owner))
-            return DeskActionResult.Fail($"No connected computer can reach {monitor.DisplayName()} right now, so its input cannot be switched.");
-        var ddcId = monitor.Source(owner!)?.DdcId;
-        if (string.IsNullOrWhiteSpace(ddcId))
-            return DeskActionResult.Fail($"{owner} has no DDC address for {monitor.DisplayName()}.");
+        var ddcId = owner == null ? null : monitor.Source(owner)?.DdcId;
+        var target = monitor.Source(host);
 
-        var result = await SwitchAsync(owner!, ddcId!, target.Input.Value, cancel);
+        DeskActionResult result;
+        if (target?.Input != null && !string.IsNullOrWhiteSpace(owner) && !string.IsNullOrWhiteSpace(ddcId))
+        {
+            result = await SwitchAsync(owner!, ddcId!, target.Input.Value, cancel);
+            // A monitor that ignores VCP 0x60 is common enough that a refusal is not the end of it.
+            if (!result.Accepted) result = await HandOverByPowerAsync(monitor, owner!, host, result.Message, cancel);
+        }
+        else
+        {
+            result = await HandOverByPowerAsync(monitor, owner, host, null, cancel);
+        }
         if (!result.Accepted) return result;
 
         _optimistic[monitorId] = host;
@@ -307,6 +355,64 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         Broadcast();
         Changed?.Invoke();
         return DeskActionResult.Ok($"{monitor.DisplayName()} switched to {host}.");
+    }
+
+    // Hands a monitor over without knowing any input code, by moving the signal instead of the
+    // input: wake the computer that should appear, then stop the one that is on it, and let the
+    // monitor's own automatic input detection follow. This is what makes a desk work with no DDC
+    // helper installed and with monitors that ignore VCP 0x60.
+    //
+    // The cost is granularity. Video output is a property of a computer, not of one of its monitors,
+    // so every display on both computers is affected — on a desk where one computer drives several
+    // monitors, this hands over all of them. Say so rather than pretending otherwise.
+    private async Task<DeskActionResult> HandOverByPowerAsync(
+        DeskMonitorConfig monitor, string? owner, string host, string? ddcFailure, CancellationToken cancel)
+    {
+        if (host.Equals(owner, StringComparison.OrdinalIgnoreCase))
+            return DeskActionResult.Ok($"{monitor.DisplayName()} already shows {host}.");
+        if (!host.Equals(LocalName, StringComparison.OrdinalIgnoreCase) && !_peers.Contains(host, StringComparer.OrdinalIgnoreCase))
+            return DeskActionResult.Fail($"{host} is not connected, so {monitor.DisplayName()} cannot be handed to it.");
+
+        var wake = await SetPowerAsync(host, wake: true, cancel);
+        if (!wake.Accepted) return wake;
+
+        if (!string.IsNullOrWhiteSpace(owner))
+        {
+            await Task.Delay(400, cancel);
+            var sleep = await SetPowerAsync(owner!, wake: false, cancel);
+            if (!sleep.Accepted) return sleep;
+        }
+
+        var others = _config.Monitors.Count(m => m.Sources.Any(s => s.Host.Equals(owner ?? host, StringComparison.OrdinalIgnoreCase))) - 1;
+        var caveat = others > 0
+            ? $" This moves the signal rather than the input, so {owner}'s other display{(others == 1 ? "" : "s")} went with it."
+            : "";
+        var reason = ddcFailure == null
+            ? $"ScreenFuse does not know which input on {monitor.DisplayName()} shows {host}"
+            : $"{monitor.DisplayName()} refused the input switch";
+        return DeskActionResult.Ok(
+            $"{reason}, so {host} was woken and {owner ?? "the other computer"} was put to sleep instead — the monitor should follow the signal.{caveat}");
+    }
+
+    private async Task<DeskActionResult> SetPowerAsync(string host, bool wake, CancellationToken cancel)
+    {
+        if (host.Equals(LocalName, StringComparison.OrdinalIgnoreCase))
+        {
+            var local = await _router.SetDisplayPowerAsync(wake, cancel);
+            return new DeskActionResult(local.Success, local.Success ? "" : $"Could not {(wake ? "wake" : "sleep")} this computer's displays: {local.Detail}");
+        }
+
+        var requestId = Guid.NewGuid().ToString("N");
+        var completion = new TaskCompletionSource<DeskSetInputResultMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pending[requestId] = completion;
+        try
+        {
+            Send([host], MessageSerializer.Encode(MessageKind.DeskDisplayPower, new DeskDisplayPowerMessage(requestId, wake)));
+            var reply = await completion.Task.WaitAsync(RemoteTimeout, cancel);
+            return new DeskActionResult(reply.Success, reply.Success ? "" : $"{host} could not {(wake ? "wake" : "sleep")} its displays: {reply.Detail}");
+        }
+        catch (TimeoutException) { return DeskActionResult.Fail($"{host} did not answer."); }
+        finally { _pending.TryRemove(requestId, out _); }
     }
 
     private async Task<DeskActionResult> SwitchAsync(string owner, string ddcId, int input, CancellationToken cancel)
@@ -342,11 +448,9 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         await _gate.WaitAsync(cancel);
         try
         {
-            _config = WithMonitors(_config, _config.Monitors.Select(m => m.Id != monitorId ? m : new DeskMonitorConfig
-            {
-                Id = m.Id, Label = m.Label, DeskX = m.DeskX, DeskY = m.DeskY, Width = m.Width, Height = m.Height,
-                Sources = Upsert(m.Sources, host, input),
-            }).ToList());
+            _config = WithMonitors(_config, _config.Monitors
+                .Select(m => m.Id != monitorId ? m : m.With(sources: Upsert(m.Sources, host, input)))
+                .ToList());
             await PersistAsync(push: true);
         }
         finally { _gate.Release(); }
@@ -369,7 +473,14 @@ public sealed class DeskService : SimpleHostedService, IDeskService
     {
         var result = sources.Where(s => !s.Host.Equals(host, StringComparison.OrdinalIgnoreCase)).ToList();
         var existing = sources.FirstOrDefault(s => s.Host.Equals(host, StringComparison.OrdinalIgnoreCase));
-        result.Add(new MonitorSourceConfig { Host = host, Input = input, DdcId = existing?.DdcId, ScreenId = existing?.ScreenId });
+        result.Add(new MonitorSourceConfig
+        {
+            Host = host,
+            Input = input,
+            DdcId = existing?.DdcId,
+            ScreenId = existing?.ScreenId,
+            AvailableInputs = existing?.AvailableInputs ?? [],
+        });
         return result;
     }
 
@@ -379,15 +490,11 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         try
         {
             var byId = placements.ToDictionary(p => p.Monitor, StringComparer.OrdinalIgnoreCase);
-            var monitors = _config.Monitors.Select(m => !byId.TryGetValue(m.Id, out var p) ? m : new DeskMonitorConfig
-            {
-                Id = m.Id,
-                Label = string.IsNullOrWhiteSpace(p.Label) ? m.Label : p.Label,
-                DeskX = p.DeskX, DeskY = p.DeskY,
-                Width = p.Width > 0 ? p.Width : m.Width,
-                Height = p.Height > 0 ? p.Height : m.Height,
-                Sources = m.Sources,
-            }).ToList();
+            var monitors = _config.Monitors.Select(m => !byId.TryGetValue(m.Id, out var p) ? m : m.With(
+                label: string.IsNullOrWhiteSpace(p.Label) ? m.Label : p.Label,
+                deskX: p.DeskX, deskY: p.DeskY,
+                width: p.Width > 0 ? p.Width : m.Width,
+                height: p.Height > 0 ? p.Height : m.Height)).ToList();
 
             _config = WithMonitors(_config, monitors);
             _config = RebuildHosts(_config);
@@ -567,18 +674,18 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         _peers = peers;
         foreach (var gone in _reports.Keys.Where(k => !k.Equals(LocalName, StringComparison.OrdinalIgnoreCase) && !peers.Contains(k, StringComparer.OrdinalIgnoreCase)).ToList())
             _reports.TryRemove(gone, out _);
-        if (IsController && added.Length > 0)
-        {
-            // A computer that just joined needs the desk document before it can show anything useful.
-            try { Send(added, MessageSerializer.Encode(MessageKind.DeskConfigPush, new DeskConfigPushMessage(_store.Serialize(_config)))); }
-            catch (Exception ex) { _log.LogDebug(ex, "Could not send the desk document to {Peers}", string.Join(", ", added)); }
-        }
+        _replied.RemoveWhere(h => !peers.Contains(h, StringComparer.OrdinalIgnoreCase));
+        Greet(added);
         Changed?.Invoke();
         return Task.CompletedTask;
     }
 
     private async Task OnMessageReceived(string sourceHost, MessageKind kind, ReadOnlyMemory<byte> body)
     {
+        if (kind is MessageKind.DeskInventory or MessageKind.DeskState or MessageKind.DeskCommand
+            or MessageKind.DeskConfigPush or MessageKind.DeskSetInput or MessageKind.DeskSetInputResult)
+            _replied.Add(sourceHost);
+
         switch (kind)
         {
             case MessageKind.DeskInventory when IsController:
@@ -590,6 +697,15 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             {
                 var request = new DecodedMessage(kind, body).Deserialize<DeskSetInputMessage>();
                 var result = await _router.SetInputAsync(request.DdcId, request.Input);
+                Send([sourceHost], MessageSerializer.Encode(MessageKind.DeskSetInputResult,
+                    new DeskSetInputResultMessage(request.RequestId, result.Success, result.Detail)));
+                break;
+            }
+
+            case MessageKind.DeskDisplayPower:
+            {
+                var request = new DecodedMessage(kind, body).Deserialize<DeskDisplayPowerMessage>();
+                var result = await _router.SetDisplayPowerAsync(request.Wake);
                 Send([sourceHost], MessageSerializer.Encode(MessageKind.DeskSetInputResult,
                     new DeskSetInputResultMessage(request.RequestId, result.Success, result.Detail)));
                 break;

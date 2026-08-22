@@ -47,6 +47,8 @@ public enum MessageKind : byte
     DeskState = 36,             // controller → all: the merged desk, so every settings window shows the same picture
     DeskCommand = 37,           // any → controller: a desk action requested from another computer's settings window
     DeskConfigPush = 38,        // controller → all: the shared desk document (arrangement, monitors, scenes)
+    DeskDisplayPower = 39,      // controller → peer: stop or resume your video output, so a monitor's
+                                //   automatic input detection follows the signal (no DDC required)
 }
 
 public record MouseMoveMessage(string Screen, int X, int Y);
@@ -103,6 +105,7 @@ public record DeskScreenReport(
     string? PlatformId = null);
 public record DeskInventoryMessage(List<DeskMonitorReport> Monitors, List<DeskScreenReport> Screens);
 public record DeskSetInputMessage(string RequestId, string DdcId, int Input);
+public record DeskDisplayPowerMessage(string RequestId, bool Wake);
 public record DeskSetInputResultMessage(string RequestId, bool Success, string? Detail);
 public record DeskStateMonitor(
     string Id, string Label, int DeskX, int DeskY, int Width, int Height,

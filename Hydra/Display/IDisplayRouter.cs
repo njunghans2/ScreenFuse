@@ -26,4 +26,10 @@ public interface IDisplayRouter
     Task<IReadOnlyList<DisplayCommandResult>> DoctorAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<PhysicalMonitorInfo>> InventoryAsync(CancellationToken cancellationToken = default);
     Task<DisplayCommandResult> SetInputAsync(string id, int input, CancellationToken cancellationToken = default);
+
+    // Stops or resumes this computer's video output. A monitor with automatic input detection
+    // follows the signal, which hands it over without any DDC involvement — the escape hatch for
+    // computers with no DDC helper and monitors that ignore VCP 0x60. It is all of this computer's
+    // displays or none, so it cannot hand over one monitor of several.
+    Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default);
 }

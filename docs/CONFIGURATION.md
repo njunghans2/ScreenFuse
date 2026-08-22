@@ -113,7 +113,18 @@ A monitor showing another computer's input usually disappears from the local enu
 - The computer that is **not** the active source generally cannot command the monitor. Switching is therefore delegated: the desk asks whichever computer currently drives a monitor to issue the DDC command.
 - The `monitors` table is the desk's memory of monitors nobody can currently see. Deleting it loses the learned input codes.
 
-Install the DDC helper on every computer that should be able to switch monitors — `brew install m1ddc` on macOS, `sudo apt install ddcutil` on Linux; Windows needs nothing. A computer without one still appears on the desk and can still be switched *to*, but only by a peer that can reach the monitor, and it can never learn its own input codes.
+Install the DDC helper on every computer that should be able to switch monitors — `brew install m1ddc` on macOS (Apple Silicon), `sudo apt install ddcutil` on Linux; Windows needs nothing. A computer without one still appears on the desk and can still be switched *to*; it simply cannot learn its own input codes or issue a switch itself.
+
+### Switching without DDC
+
+Not every desk can switch inputs, and it does not have to. If ScreenFuse does not know the input code for the computer you pick — or the monitor refuses the switch — it hands the monitor over by **moving the signal instead of the input**: the computer that should appear is woken, the one currently on the monitor stops its video output, and the monitor's own automatic input detection follows. No DDC helper, no input codes, nothing to configure.
+
+Two things to know before relying on it:
+
+- **It is per computer, not per monitor.** Video output is a property of a machine, so every display on both computers moves together. On a desk where one computer drives several monitors, handing one over hands over all of them. ScreenFuse says so in the result message when that applies.
+- **The monitor must have automatic input detection enabled.** Most do by default; some scan only on signal loss, and a few need it turned on in their on-screen menu.
+
+DDC is tried first whenever a code is known, because it is exact and affects one monitor. The signal handover is the fallback, and it is why a fresh desk works before anything has been set up.
 
 The crossing edges in `hosts` are **derived** from the arrangement plus each scene's monitor assignments — two monitors that touch on the desk become a crossing only while different computers are on them, and the shared portion of the touching edge becomes the percentage range. Editing `hosts` by hand still works, but the settings window rewrites it whenever the arrangement changes.
 

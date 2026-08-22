@@ -168,8 +168,13 @@ internal static partial class AgentCommands
                 </array>
                 <key>RunAtLoad</key>
                 <true/>
+                <!-- Restart only when ScreenFuse dies unexpectedly. A plain <true/> here relaunches it
+                     after a clean exit too, so "Quit ScreenFuse" would put the icon straight back. -->
                 <key>KeepAlive</key>
-                <true/>
+                <dict>
+                    <key>SuccessfulExit</key>
+                    <false/>
+                </dict>
                 <key>StandardOutPath</key>
                 <string>{stdout}</string>
                 <key>StandardErrorPath</key>
