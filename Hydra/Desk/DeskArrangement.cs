@@ -36,12 +36,33 @@ public static class DeskArrangement
         return placed;
     }
 
+    // Crossings are between computers, not between monitors, and they deliberately name no screen.
+    //
+    // Naming one is what broke the pointer. A crossing is only reachable at the outer edge of the
+    // computer's own desktop, and which monitor that is belongs to the operating system, not to the
+    // desk: a monitor currently showing another computer is still a live display on this one — the
+    // video link stays up even when the panel is showing a different input — so the desk's idea of
+    // who owns a monitor says nothing about where a computer's desktop ends. Anchoring a crossing to
+    // "the monitor the Mac is on" put it on an edge in the middle of Windows' desktop, where the
+    // pointer simply moves to the next Windows screen and never leaves.
+    //
+    // Leaving the screens unset hands that decision back to the input router, which already picks
+    // the outermost screen for the direction out of the live layout.
     public static List<HostConfig> BuildHosts(IReadOnlyList<Placed> placed, IEnumerable<string> allHosts)
     {
         var hosts = new Dictionary<string, HostConfig>(StringComparer.OrdinalIgnoreCase);
         foreach (var name in allHosts.Concat(placed.Select(p => p.Host)))
             if (!string.IsNullOrWhiteSpace(name) && !hosts.ContainsKey(name))
                 hosts[name] = new HostConfig { Name = name };
+
+        // How much edge each pair of computers shares, per direction. The longest shared edge is the
+        // one the user means by putting those monitors next to each other.
+        var shared = new Dictionary<(string From, string To, Direction Dir), int>();
+        void Note(string from, string to, Direction dir, int amount)
+        {
+            var key = (from, to, dir);
+            shared[key] = shared.GetValueOrDefault(key) + amount;
+        }
 
         foreach (var a in placed)
         {
@@ -50,10 +71,23 @@ public static class DeskArrangement
                 if (ReferenceEquals(a, b) || a.Host.Equals(b.Host, StringComparison.OrdinalIgnoreCase)) continue;
 
                 if (Touching(a.Right, b.X) && Overlap(a.Y, a.Bottom, b.Y, b.Bottom) is var (top, bottom) && bottom > top)
-                    Link(hosts, a, b, Direction.Right, top, bottom, vertical: true);
+                    Note(a.Host, b.Host, Direction.Right, bottom - top);
                 else if (Touching(a.Bottom, b.Y) && Overlap(a.X, a.Right, b.X, b.Right) is var (left, right) && right > left)
-                    Link(hosts, a, b, Direction.Down, left, right, vertical: false);
+                    Note(a.Host, b.Host, Direction.Down, right - left);
             }
+        }
+
+        // One crossing per pair of computers, in the direction they share the most edge. Mirror is
+        // on so the way back is derived rather than stated twice — and so a computer with monitors
+        // on both sides of another still gets a working return path.
+        foreach (var group in shared.GroupBy(e => Unordered(e.Key.From, e.Key.To)))
+        {
+            var best = group.MaxBy(e => e.Value);
+            var (from, to, dir) = best.Key;
+            var host = hosts[from];
+            if (host.Neighbours.Any(n => n.Name.Equals(to, StringComparison.OrdinalIgnoreCase))) continue;
+            if (hosts[to].Neighbours.Any(n => n.Name.Equals(from, StringComparison.OrdinalIgnoreCase))) continue;
+            host.Neighbours.Add(new NeighbourConfig { Direction = dir, Name = to, Mirror = true });
         }
 
         return hosts.Values.ToList();
@@ -64,48 +98,7 @@ public static class DeskArrangement
     private static (int Start, int End) Overlap(int aStart, int aEnd, int bStart, int bEnd) =>
         (Math.Max(aStart, bStart), Math.Min(aEnd, bEnd));
 
-    // Adds the crossing and its return path in one go. Mirror is off because both directions are
-    // written explicitly — the shared span maps to a different percentage of each monitor whenever
-    // the two are not the same height, and a mirrored guess would land the pointer off-centre.
-    private static void Link(
-        Dictionary<string, HostConfig> hosts, Placed a, Placed b,
-        Direction direction, int start, int end, bool vertical)
-    {
-        var (aOrigin, aSize) = vertical ? (a.Y, a.Height) : (a.X, a.Width);
-        var (bOrigin, bSize) = vertical ? (b.Y, b.Height) : (b.X, b.Width);
+    private static (string, string) Unordered(string a, string b) =>
+        string.Compare(a, b, StringComparison.OrdinalIgnoreCase) <= 0 ? (a, b) : (b, a);
 
-        var sourceStart = Percent(start - aOrigin, aSize);
-        var sourceEnd = Percent(end - aOrigin, aSize);
-        var destStart = Percent(start - bOrigin, bSize);
-        var destEnd = Percent(end - bOrigin, bSize);
-        if (sourceEnd <= sourceStart || destEnd <= destStart) return;
-
-        hosts[a.Host].Neighbours.Add(new NeighbourConfig
-        {
-            Direction = direction,
-            Name = b.Host,
-            SourceScreen = a.ScreenId,
-            DestScreen = b.ScreenId,
-            SourceStart = sourceStart,
-            SourceEnd = sourceEnd,
-            DestStart = destStart,
-            DestEnd = destEnd,
-            Mirror = false,
-        });
-        hosts[b.Host].Neighbours.Add(new NeighbourConfig
-        {
-            Direction = direction.Opposite(),
-            Name = a.Host,
-            SourceScreen = b.ScreenId,
-            DestScreen = a.ScreenId,
-            SourceStart = destStart,
-            SourceEnd = destEnd,
-            DestStart = sourceStart,
-            DestEnd = sourceEnd,
-            Mirror = false,
-        });
-    }
-
-    private static int Percent(int offset, int size) =>
-        size <= 0 ? 0 : Math.Clamp((int)Math.Round(offset * 100.0 / size), 0, 100);
 }

@@ -173,7 +173,19 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
         if (OperatingSystem.IsWindows()) return WindowsDdc.Probe();
         var helper = OperatingSystem.IsMacOS() ? "m1ddc" : "ddcutil";
         var args = OperatingSystem.IsMacOS() ? new[] { "display", "list" } : new[] { "detect", "--brief" };
-        return [await RunAsync(helper, args, $"probe {helper}", cancellationToken)];
+
+        // Which binary got picked is the first thing worth knowing when DDC "does not work" on a
+        // machine where the helper is demonstrably installed.
+        var resolved = ResolveHelper(helper);
+        var found = Path.IsPathRooted(resolved);
+        var where = new DisplayCommandResult(
+            $"locate {helper}",
+            found,
+            found
+                ? $"{resolved}{(resolved.StartsWith(AppContext.BaseDirectory, StringComparison.Ordinal) ? " (shipped with ScreenFuse)" : "")}"
+                : $"not found beside ScreenFuse, in {string.Join(", ", HelperDirectories)}, or on PATH ({Environment.GetEnvironmentVariable("PATH")})");
+
+        return [where, await RunAsync(helper, args, $"probe {helper}", cancellationToken)];
     }
 
     private static Task<DisplayCommandResult> SetInputWithHelperAsync(MonitorInputConfig input, CancellationToken cancellationToken)
@@ -225,6 +237,58 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
         return Task.FromResult(new DisplayCommandResult(wake ? "wake displays" : "sleep displays", false, "Unsupported operating system"));
     }
 
+    // Where the package managers actually put things. Bare PATH lookup is not enough: a launchd
+    // agent inherits a minimal PATH of /usr/bin:/bin:/usr/sbin:/sbin, so an m1ddc installed by
+    // Homebrew into /opt/homebrew/bin is invisible to it and every DDC call fails with "No such
+    // file or directory" — on a machine where the user can run m1ddc perfectly well in a terminal.
+    private static readonly string[] HelperDirectories =
+    [
+        "/opt/homebrew/bin",   // Homebrew on Apple Silicon
+        "/usr/local/bin",      // Homebrew on Intel, and most manual installs
+        "/opt/local/bin",      // MacPorts
+        "/usr/bin",
+        "/bin",
+        "/snap/bin",           // ddcutil from a snap
+    ];
+
+    private static readonly Dictionary<string, string> ResolvedHelpers = new(StringComparer.OrdinalIgnoreCase);
+
+    internal static string ResolveHelper(string fileName)
+    {
+        lock (ResolvedHelpers)
+        {
+            if (ResolvedHelpers.TryGetValue(fileName, out var cached)) return cached;
+
+            var resolved = FindHelper(fileName);
+            ResolvedHelpers[fileName] = resolved;
+            return resolved;
+        }
+    }
+
+    private static string FindHelper(string fileName)
+    {
+        var executableName = OperatingSystem.IsWindows() ? fileName + ".exe" : fileName;
+
+        // Shipped alongside ScreenFuse wins: it is the version we tested against.
+        var bundled = Path.Combine(AppContext.BaseDirectory, executableName);
+        if (File.Exists(bundled)) return bundled;
+
+        foreach (var directory in HelperDirectories)
+        {
+            var candidate = Path.Combine(directory, executableName);
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
+        {
+            if (string.IsNullOrWhiteSpace(directory)) continue;
+            var candidate = Path.Combine(directory.Trim(), executableName);
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        return fileName; // let the OS try, and report its error verbatim
+    }
+
     internal static async Task<DisplayCommandResult> RunAsync(string fileName, IReadOnlyList<string> args, string label, CancellationToken cancellationToken)
     {
         Process? process = null;
@@ -232,8 +296,7 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
         timeout.CancelAfter(TimeSpan.FromSeconds(8));
         try
         {
-            var bundled = Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? fileName + ".exe" : fileName);
-            var executable = File.Exists(bundled) ? bundled : fileName;
+            var executable = ResolveHelper(fileName);
             var psi = new ProcessStartInfo(executable)
             {
                 RedirectStandardOutput = true,

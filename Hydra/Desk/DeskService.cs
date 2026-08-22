@@ -210,6 +210,23 @@ public sealed class DeskService : SimpleHostedService, IDeskService
                     _optimistic.Remove(id);
 
             _snapshot = BuildSnapshot(merge.Views);
+
+            // The arrangement is the source of truth for where the pointer crosses. Deriving the
+            // crossings only when someone presses Save leaves a desk whose monitors have moved —
+            // or whose stored edges came from an older, worse rule — quietly unable to cross at
+            // all, which is indistinguishable from the feature being broken.
+            if (IsController && _snapshot.Monitors.Count > 0)
+            {
+                var rebuilt = RebuildHosts(_config);
+                if (!SameTopology(_config, rebuilt))
+                {
+                    _log.LogInformation("Desk crossings changed; rewriting the computer layout");
+                    _config = rebuilt;
+                    await PersistAsync(push: true);
+                    ScheduleRestart();
+                }
+            }
+
             Broadcast();
         }
         finally { _gate.Release(); }
@@ -340,13 +357,9 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         if (target?.Input != null && !string.IsNullOrWhiteSpace(owner) && !string.IsNullOrWhiteSpace(ddcId))
         {
             result = await SwitchAsync(owner!, ddcId!, target.Input.Value, cancel);
-            // A monitor that ignores VCP 0x60 is common enough that a refusal is not the end of it.
-            if (!result.Accepted) result = await HandOverByPowerAsync(monitor, owner!, host, result.Message, cancel);
+            if (!result.Accepted) result = ExplainSwitchGap(monitor, owner, host, result.Message);
         }
-        else
-        {
-            result = await HandOverByPowerAsync(monitor, owner, host, null, cancel);
-        }
+        else result = ExplainSwitchGap(monitor, owner, host, null);
         if (!result.Accepted) return result;
 
         _optimistic[monitorId] = host;
@@ -357,62 +370,30 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         return DeskActionResult.Ok($"{monitor.DisplayName()} switched to {host}.");
     }
 
-    // Hands a monitor over without knowing any input code, by moving the signal instead of the
-    // input: wake the computer that should appear, then stop the one that is on it, and let the
-    // monitor's own automatic input detection follow. This is what makes a desk work with no DDC
-    // helper installed and with monitors that ignore VCP 0x60.
+    // Explains what is missing and what to do about it.
     //
-    // The cost is granularity. Video output is a property of a computer, not of one of its monitors,
-    // so every display on both computers is affected — on a desk where one computer drives several
-    // monitors, this hands over all of them. Say so rather than pretending otherwise.
-    private async Task<DeskActionResult> HandOverByPowerAsync(
-        DeskMonitorConfig monitor, string? owner, string host, string? ddcFailure, CancellationToken cancel)
+    // There is deliberately no automatic fallback here. Putting the losing computer's displays to
+    // sleep looks like it would work and does not: ScreenFuse is forwarding input to that computer,
+    // so the first mouse move wakes the display straight back up and the monitor returns. Video
+    // output would have to be switched off rather than idled, and no operating system offers that
+    // for one monitor of several. Saying what is missing beats doing something that undoes itself.
+    private DeskActionResult ExplainSwitchGap(DeskMonitorConfig monitor, string? owner, string host, string? ddcFailure)
     {
         if (host.Equals(owner, StringComparison.OrdinalIgnoreCase))
             return DeskActionResult.Ok($"{monitor.DisplayName()} already shows {host}.");
-        if (!host.Equals(LocalName, StringComparison.OrdinalIgnoreCase) && !_peers.Contains(host, StringComparer.OrdinalIgnoreCase))
-            return DeskActionResult.Fail($"{host} is not connected, so {monitor.DisplayName()} cannot be handed to it.");
+        if (ddcFailure != null)
+            return DeskActionResult.Fail($"{monitor.DisplayName()} refused the input switch: {ddcFailure}");
+        if (string.IsNullOrWhiteSpace(owner))
+            return DeskActionResult.Fail($"No connected computer can reach {monitor.DisplayName()} right now, so its input cannot be switched.");
 
-        var wake = await SetPowerAsync(host, wake: true, cancel);
-        if (!wake.Accepted) return wake;
-
-        if (!string.IsNullOrWhiteSpace(owner))
-        {
-            await Task.Delay(400, cancel);
-            var sleep = await SetPowerAsync(owner!, wake: false, cancel);
-            if (!sleep.Accepted) return sleep;
-        }
-
-        var others = _config.Monitors.Count(m => m.Sources.Any(s => s.Host.Equals(owner ?? host, StringComparison.OrdinalIgnoreCase))) - 1;
-        var caveat = others > 0
-            ? $" This moves the signal rather than the input, so {owner}'s other display{(others == 1 ? "" : "s")} went with it."
-            : "";
-        var reason = ddcFailure == null
-            ? $"ScreenFuse does not know which input on {monitor.DisplayName()} shows {host}"
-            : $"{monitor.DisplayName()} refused the input switch";
-        return DeskActionResult.Ok(
-            $"{reason}, so {host} was woken and {owner ?? "the other computer"} was put to sleep instead — the monitor should follow the signal.{caveat}");
-    }
-
-    private async Task<DeskActionResult> SetPowerAsync(string host, bool wake, CancellationToken cancel)
-    {
-        if (host.Equals(LocalName, StringComparison.OrdinalIgnoreCase))
-        {
-            var local = await _router.SetDisplayPowerAsync(wake, cancel);
-            return new DeskActionResult(local.Success, local.Success ? "" : $"Could not {(wake ? "wake" : "sleep")} this computer's displays: {local.Detail}");
-        }
-
-        var requestId = Guid.NewGuid().ToString("N");
-        var completion = new TaskCompletionSource<DeskSetInputResultMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _pending[requestId] = completion;
-        try
-        {
-            Send([host], MessageSerializer.Encode(MessageKind.DeskDisplayPower, new DeskDisplayPowerMessage(requestId, wake)));
-            var reply = await completion.Task.WaitAsync(RemoteTimeout, cancel);
-            return new DeskActionResult(reply.Success, reply.Success ? "" : $"{host} could not {(wake ? "wake" : "sleep")} its displays: {reply.Detail}");
-        }
-        catch (TimeoutException) { return DeskActionResult.Fail($"{host} did not answer."); }
-        finally { _pending.TryRemove(requestId, out _); }
+        // The monitor has already said which codes it accepts, so name the ones still unaccounted
+        // for — that is a short list to try rather than an open question.
+        var taken = monitor.Sources.Where(s => s.Input != null).Select(s => s.Input!.Value).ToHashSet();
+        var candidates = (monitor.Source(owner!)?.AvailableInputs ?? []).Where(i => !taken.Contains(i)).ToList();
+        var hint = candidates.Count > 0
+            ? $" It accepts {string.Join(", ", candidates)} besides the codes already known — try those under 'How each computer is wired'."
+            : " Set it under 'How each computer is wired'.";
+        return DeskActionResult.Fail($"ScreenFuse does not know which input on {monitor.DisplayName()} shows {host}.{hint}");
     }
 
     private async Task<DeskActionResult> SwitchAsync(string owner, string ddcId, int input, CancellationToken cancel)
@@ -599,6 +580,17 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             return Clone(profile, DeskArrangement.BuildHosts(placed, allHosts));
         }).ToList();
         return WithProfiles(file, profiles);
+    }
+
+    // Compares only what the pointer cares about: who is next to whom, in which direction.
+    private static bool SameTopology(HydraConfigFile a, HydraConfigFile b)
+    {
+        static List<string> Edges(HydraConfigFile file) => file.Profiles
+            .SelectMany(p => p.Hosts.SelectMany(h => h.Neighbours.Select(n =>
+                $"{p.ProfileName}|{h.Name}|{n.Direction}|{n.Name}|{n.SourceScreen}|{n.DestScreen}".ToLowerInvariant())))
+            .OrderBy(s => s, StringComparer.Ordinal)
+            .ToList();
+        return Edges(a).SequenceEqual(Edges(b), StringComparer.Ordinal);
     }
 
     private static HydraConfig Clone(HydraConfig source, List<HostConfig> hosts) => new()

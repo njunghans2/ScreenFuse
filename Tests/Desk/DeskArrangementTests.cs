@@ -26,9 +26,10 @@ public class DeskArrangementTests
         {
             Assert.That(mac.Neighbours.Single().Direction, Is.EqualTo(Direction.Right));
             Assert.That(mac.Neighbours.Single().Name, Is.EqualTo("pc"));
-            Assert.That(mac.Neighbours.Single().DestScreen, Is.EqualTo("pc:screen"));
-            Assert.That(pc.Neighbours.Single().Direction, Is.EqualTo(Direction.Left));
-            Assert.That(pc.Neighbours.Single().Name, Is.EqualTo("mac"));
+            Assert.That(mac.Neighbours.Single().DestScreen, Is.Null,
+                "which screen the pointer arrives on is the receiving computer's business");
+            Assert.That(mac.Neighbours.Single().Mirror, Is.True);
+            Assert.That(pc.Neighbours, Is.Empty, "the way back is expanded from the mirror, not written twice");
         }
     }
 
@@ -44,10 +45,12 @@ public class DeskArrangementTests
     }
 
     [Test]
-    public void APartialOverlapBecomesAPercentageRangeOnBothEdges()
+    public void MonitorsOfDifferentHeightsStillCrossAcrossTheWholeEdge()
     {
-        // A 1080-tall monitor beside a 2160-tall one, aligned at the top: the crossing covers all of
-        // the short one but only the upper half of the tall one.
+        // A 1080-tall monitor beside a 2160-tall one. An earlier rule narrowed the crossing to the
+        // shared span as a percentage of each *monitor* — but the pointer crosses at the edge of a
+        // *computer's desktop*, whose extent the desk does not know, so a percentage computed from
+        // one monitor put the crossing in the wrong place. The whole edge is the honest answer.
         var monitors = new List<DeskMonitorConfig>
         {
             Monitor("short", "mac", 0, 0, 1920, 1080),
@@ -62,7 +65,7 @@ public class DeskArrangementTests
             Assert.That(neighbour.SourceStart, Is.EqualTo(0));
             Assert.That(neighbour.SourceEnd, Is.EqualTo(100));
             Assert.That(neighbour.DestStart, Is.EqualTo(0));
-            Assert.That(neighbour.DestEnd, Is.EqualTo(50));
+            Assert.That(neighbour.DestEnd, Is.EqualTo(100));
         }
     }
 

@@ -59,6 +59,47 @@ internal static partial class AgentCommands
         Console.WriteLine("ScreenFuse agent installed and started.");
     }
 
+    // Quitting has to tell launchd, not just exit.
+    //
+    // Rewriting the plist is not enough on its own: launchd read KeepAlive when the job was
+    // bootstrapped, so a job already loaded with the old <true/> keeps relaunching ScreenFuse no
+    // matter what the file on disk says. Booting the job out of the domain ends it now and for the
+    // rest of this login session; the LaunchAgent is bootstrapped again at the next login, which is
+    // exactly the "quit until I come back" the menu item promises.
+    internal static void StopAgent()
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+        try
+        {
+            RewritePlistIfStale();
+            RunLaunchctl($"bootout {DomainTarget()}/{Label}", tolerateFailure: true);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Could not stop the ScreenFuse launch agent: {ex.Message}");
+        }
+    }
+
+    // Brings an agent installed by an older build up to date, so the next login no longer relaunches
+    // ScreenFuse after a clean quit even if the user never reinstalls the startup entry.
+    private static void RewritePlistIfStale()
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var plistPath = Path.Combine(home, "Library", "LaunchAgents", PlistFileName);
+        if (!File.Exists(plistPath)) return;
+
+        var current = File.ReadAllText(plistPath);
+        if (current.Contains("SuccessfulExit", StringComparison.Ordinal)) return;
+
+        var exePath = Environment.ProcessPath;
+        var workingDir = exePath == null ? null : Path.GetDirectoryName(exePath);
+        if (exePath == null || workingDir == null) return;
+        var logDir = Path.Combine(home, "Library", "Logs", "ScreenFuse");
+
+        File.WriteAllText(plistPath, GeneratePlist(exePath, workingDir, logDir), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        Console.WriteLine("Updated the ScreenFuse launch agent so a deliberate quit is no longer undone.");
+    }
+
     internal static void Uninstall()
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
