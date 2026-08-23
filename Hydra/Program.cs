@@ -22,7 +22,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 // Command-line runs need the console that launched them; the tray agent has none by design.
-if (args.Any(a => a is "--doctor" or "--scene" or "--install" or "--uninstall" or "--version"))
+if (args.Any(a => a is "--doctor" or "--scene" or "--install" or "--uninstall" or "--stop" or "--version"))
     ConsoleAttach.ToParent();
 
 // ensure console can display non-ASCII characters (e.g. '€', 'ø') in debug logs
@@ -52,9 +52,32 @@ if (args.Contains("--install"))
 }
 if (args.Contains("--uninstall"))
 {
-    if (OperatingSystem.IsWindows()) ServiceCommands.Uninstall();
-    else if (OperatingSystem.IsMacOS()) AgentCommands.Uninstall();
+    // --purge also removes the settings. Without it an uninstall keeps the desk, the pairing and the
+    // learned monitor wiring, so reinstalling picks up where it left off rather than starting over.
+    var purge = args.Contains("--purge");
+    if (OperatingSystem.IsWindows()) ServiceCommands.Uninstall(purge);
+    else if (OperatingSystem.IsMacOS()) AgentCommands.Uninstall(purge);
     else if (OperatingSystem.IsLinux()) LinuxServiceCommands.Uninstall();
+    return;
+}
+
+// Stop without uninstalling, and stay stopped.
+//
+// Ending the process is not enough on either platform: the Windows service restarts after what it
+// reads as a failure, and the macOS job is relaunched by launchd. Both need to be told, and there
+// was no way to tell them from a terminal -- so the only route was the tray menu of an application
+// whose whole problem might be that it will not behave.
+if (args.Contains("--stop"))
+{
+    if (OperatingSystem.IsWindows())
+        Console.WriteLine(ServiceCommands.StopService()
+            ? "ScreenFuse stopped. It stays stopped until it is started again or the machine reboots."
+            : "Could not stop the ScreenFuse service -- run this from an elevated prompt.");
+    else if (OperatingSystem.IsMacOS())
+    {
+        AgentCommands.StopAgent();
+        Console.WriteLine("ScreenFuse stopped. It stays stopped until the next login.");
+    }
     return;
 }
 
