@@ -184,7 +184,10 @@ public static class DeskMerge
             .Select(c => c.Host)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
-        if (unnamedReaders.Count == 1) return (unnamedReaders[0], (unnamedReaders[0], live));
+        if (unnamedReaders.Count == 1)
+            return Supported(monitor, live)
+                ? (unnamedReaders[0], (unnamedReaders[0], live))
+                : (unnamedReaders[0], null);
 
         // Every computer that can read it already knows its own code, and this is none of them — so
         // the monitor is showing someone else. If exactly one computer here is still unidentified,
@@ -199,12 +202,27 @@ public static class DeskMerge
             var candidates = monitor.Sources
                 .Where(s => s.Input == null && present.Contains(s.Host, StringComparer.OrdinalIgnoreCase))
                 .ToList();
-            if (candidates.Count == 1) return (candidates[0].Host, (candidates[0].Host, live));
+            if (candidates.Count == 1 && Supported(monitor, live))
+                return (candidates[0].Host, (candidates[0].Host, live));
         }
 
-        // More than one it could be. Saying nothing costs a round of learning; saying the wrong
-        // thing costs the wiring, and it is believed from then on.
-        return (null, null);
+        // More than one computer it could be, or a reading the monitor does not admit to. Nothing is
+        // learned -- but a monitor is never left with nobody on it. An owner that is merely uncertain
+        // is still an owner; dropping it takes the monitor out of the arrangement, and every crossing
+        // through it goes with it, which is far worse than naming the wrong computer.
+        return (readings[0].Host, null);
+    }
+
+    // A code the monitor itself does not list is not one of its sockets.
+    //
+    // Helpers do not all fail cleanly: m1ddc answers 352 for one of these panels, and a reading that
+    // survives parsing but means nothing would otherwise be written down as a computer's input and
+    // believed from then on. Monitors that never reported their capabilities are taken at their word,
+    // since there is nothing to check against.
+    private static bool Supported(Builder monitor, int input)
+    {
+        var known = monitor.Sources.SelectMany(s => s.AvailableInputs).Distinct().ToList();
+        return known.Count == 0 || known.Contains(input);
     }
 
     // -- identity --------------------------------------------------------------------------------

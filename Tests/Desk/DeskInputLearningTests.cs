@@ -168,6 +168,75 @@ public class DeskInputLearningTests
     }
 
     [Test]
+    public void AMonitorIsNeverLeftWithNobodyOnIt()
+    {
+        // Both computers know their sockets and the monitor reports a third. Nothing can be learned
+        // from that, but the monitor must still belong to someone: a monitor with no computer on it
+        // drops out of the arrangement, and every crossing through it goes with it. That is how a
+        // desk ends up reporting "no crossings -- the pointer cannot leave this computer".
+        var reports = new Dictionary<string, DeskInventoryMessage>
+        {
+            ["NINOG"] = Inventory(
+                [(@"\.\DISPLAY1", "AORUS FI27Q-X", 3)],
+                [("NINOG:0", @"\.\DISPLAY1", null, 0, 0, 2560, 1440)]),
+        };
+
+        var merged = DeskMerge.Merge(Aorus(macInput: 17), reports);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(merged.Views.Single().ActiveHost, Is.Not.Null.And.Not.Empty);
+            Assert.That(merged.Monitors.Single().Source("NINOG")!.Input, Is.EqualTo(15));
+            Assert.That(merged.Monitors.Single().Source("Mac")!.Input, Is.EqualTo(17));
+        }
+    }
+
+    [Test]
+    public void AReadingTheMonitorDoesNotAdmitToIsNotLearned()
+    {
+        // m1ddc answers 352 for one of these panels. It parses as a number and means nothing, and
+        // writing it down as a computer's input would be believed from then on. The monitor lists
+        // the sockets it has; a code that is not among them is not one of them.
+        List<DeskMonitorConfig> benq =
+        [
+            new()
+            {
+                Id = "benq",
+                Label = "BenQ XL2420T (DisplayPort)",
+                Aliases = ["BenQ XL2420T"],
+                Width = 1920, Height = 1080,
+                Sources =
+                [
+                    new MonitorSourceConfig
+                    {
+                        Host = "NINOG", Input = 15, DdcId = @"\.\DISPLAY2", ScreenId = @"\.\DISPLAY2",
+                        AvailableInputs = [1, 3, 17, 18, 15],
+                    },
+                    new MonitorSourceConfig { Host = "Mac", Input = null, DdcId = "63D2A36B", ScreenId = "BenQ XL2420T" },
+                ],
+            },
+        ];
+        var reports = new Dictionary<string, DeskInventoryMessage>
+        {
+            ["NINOG"] = Inventory(
+                [(@"\.\DISPLAY2", "BenQ XL2420T", 96)],
+                [("NINOG:1", @"\.\DISPLAY2", null, 0, 0, 1920, 1080)]),
+            ["Mac"] = Inventory([], [("Mac:2", null, "BenQ XL2420T", 0, 0, 1920, 1080)]),
+        };
+
+        var merged = DeskMerge.Merge(benq, reports);
+        var monitor = merged.Monitors.Single();
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(monitor.Source("Mac")!.Input, Is.Null,
+                "96 is not one of the sockets this monitor says it has");
+            Assert.That(monitor.Source("NINOG")!.Input, Is.EqualTo(15));
+            Assert.That(merged.Views.Single().ActiveHost, Is.Not.Null.And.Not.Empty);
+        }
+    }
+
+    [Test]
     public void ACodeAlreadySpokenForIsNotHandedToAnyoneElse()
     {
         // Windows reads its own code back while the Mac is known to be on 17. Nothing to learn, and
