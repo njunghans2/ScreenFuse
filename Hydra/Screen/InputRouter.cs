@@ -101,6 +101,7 @@ public class InputRouter(
         relay.MessageReceived += OnMessageReceived;
         relay.Disconnected += OnRelayDisconnected;
         screens.ScreensChanged += OnScreensChanged;
+        profile.HostsChanged += OnHostsChanged;
 
         _pollCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
@@ -126,6 +127,7 @@ public class InputRouter(
         relay.MessageReceived -= OnMessageReceived;
         relay.Disconnected -= OnRelayDisconnected;
         screens.ScreensChanged -= OnScreensChanged;
+        profile.HostsChanged -= OnHostsChanged;
 
         _screenSaverSync.ScreensaverActivated -= OnScreensaverActivated;
         _screenSaverSync.ScreensaverDeactivated -= OnScreensaverDeactivated;
@@ -203,6 +205,30 @@ public class InputRouter(
         if (!_commands.Writer.TryWrite(_ => { tcs.TrySetResult(); return ValueTask.CompletedTask; }))
             return Task.CompletedTask;
         return tcs.Task;
+    }
+
+    // The desk was rearranged. The crossings live in Hosts and the layout is derived from them, so
+    // it has to be derived again — the pointer uses the layout, not the config, and nothing else
+    // here would ever ask for it. Dragging a monitor changes no screen and moves no peer, which is
+    // exactly why the two rebuild triggers below could not cover this.
+    private void OnHostsChanged() => _ = RebuildForNewCrossingsAsync();
+
+    private async Task RebuildForNewCrossingsAsync()
+    {
+        try
+        {
+            var peerScreens = await _peerState.GetPeerScreensSnapshot();
+            await RunFence(st =>
+            {
+                RebuildLayout(st, peerScreens);
+                return ValueTask.CompletedTask;
+            });
+            log.LogInformation("Desk crossings changed — pointer layout rebuilt");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogError(ex, "Failed to rebuild the pointer layout after the desk changed");
+        }
     }
 
     private async Task OnScreensChanged(LocalScreenSnapshot snapshot)

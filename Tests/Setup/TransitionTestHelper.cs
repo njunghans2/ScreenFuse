@@ -46,6 +46,20 @@ public static class TransitionTestHelper
         return new TestServiceBundle(platform, relay, service);
     }
 
+    // Same as CreateService, but with a profile the test holds on to, so it can rearrange the desk
+    // mid-test the way DeskService does at runtime.
+    public static TestServiceBundle CreateServiceWith(IHydraProfile profile)
+    {
+        var platform = new FakePlatform();
+        var relay = new FakeRelay();
+        var screens = new FakeScreenDetector();
+        var tracker = new ActivityTracker(profile, new Lazy<IRelaySender>(() => relay), new WorldState(), new NullScreenSaverSync(), NullLogger<ActivityTracker>.Instance);
+        var service = new InputRouter(platform, platform, profile, relay, screens, NullLoggerFactory.Instance, NullLogger<InputRouter>.Instance, new NullScreenSaverSync(), new NullClipboardSync(),
+            FileTransferService.Null(), new NullFileSelectionDetector(), new NullOsdNotification(), tracker);
+        platform.AfterFireCallback = service.FlushAsync;
+        return new TestServiceBundle(platform, relay, service);
+    }
+
     public static async Task BringRemoteOnline(FakeRelay relay)
     {
         await relay.FirePeersChanged("remote");
