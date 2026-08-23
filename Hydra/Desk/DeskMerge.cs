@@ -146,33 +146,65 @@ public static class DeskMerge
     //     they read says which input is live, and the computer whose known code matches is the one
     //     on screen. Nothing new is learned, because the reading no longer identifies the reader.
     //   - Nobody can read it over DDC → the only computer that lists it as a screen is on it.
+    // Who is on the monitor, and what that tells us about the wiring.
+    //
+    // The only hard fact available is VCP 0x60: the code of the input the monitor is *displaying*.
+    // Which computer read it says less than it seems, because monitors commonly go on answering a
+    // computer they are not showing. Attributing every reading to whoever asked is how a computer
+    // overwrites its own correct code with the other one's, after which switching sends it to the
+    // wrong socket and nothing about the desk explains why.
+    //
+    // Two computers can rarely be asked at the same time: one is showing and the other is usually
+    // unreachable. So the moment a computer is on screen is the only chance to learn its socket, and
+    // what is learned then has to be kept — which is what makes guessing expensive here. A wrong
+    // code is believed indefinitely and cannot be re-derived.
     private static (string? Host, (string Host, int Input)? Learned) Resolve(Builder monitor, List<Claim> claims)
     {
-        var ddc = claims.Where(c => c.ViaDdc).ToList();
-        if (ddc.Count == 0)
+        var present = claims.Select(c => c.Host).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var readings = claims.Where(c => c.ViaDdc && c.CurrentInput is >= 0 and <= 255).ToList();
+
+        // Nothing readable — a panel that answers no DDC, or a helper that is missing. Whoever is
+        // here is the best answer there is, and with one computer it is a certain one.
+        if (readings.Count == 0)
         {
-            var screenOnly = claims.Select(c => c.Host).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            return (screenOnly.Count == 1 ? screenOnly[0] : screenOnly.FirstOrDefault(), null);
+            var reader = claims.FirstOrDefault(c => c.ViaDdc)?.Host;
+            return (reader ?? present.FirstOrDefault(), null);
         }
 
-        if (ddc.Count == 1)
+        var live = readings[0].CurrentInput!.Value;
+
+        // A computer already owns this code, so it is the one being shown — whoever read it.
+        var owner = monitor.Sources.FirstOrDefault(s => s.Input == live);
+        if (owner != null) return (owner.Host, null);
+
+        // A computer that can read the monitor and has no code of its own yet: the ordinary way a
+        // desk starts. There is nothing else this reading could be about, so it takes it.
+        var unnamedReaders = readings
+            .Where(c => monitor.Sources.FirstOrDefault(s => Same(s.Host, c.Host))?.Input == null)
+            .Select(c => c.Host)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (unnamedReaders.Count == 1) return (unnamedReaders[0], (unnamedReaders[0], live));
+
+        // Every computer that can read it already knows its own code, and this is none of them — so
+        // the monitor is showing someone else. If exactly one computer here is still unidentified,
+        // that is who, and this is the code that selects it. This is the inference that turns
+        // switching the input by hand into the desk learning the wiring, and it is the only chance
+        // to learn it: the computer being shown often cannot be asked anything itself.
+        //
+        // Restricted to computers currently reporting — one that is switched off cannot be the one
+        // on screen, and inferring about it would pin a code to a machine that was not in the room.
+        if (unnamedReaders.Count == 0)
         {
-            var only = ddc[0];
-            if (only.CurrentInput is not (>= 0 and <= 255)) return (only.Host, null);
-
-            // Some monitors keep talking on an input they are not showing. If the live input is a
-            // code another computer already owns, this reading says who is on screen — not who is
-            // asking — and learning from it would hand this computer the other one's input.
-            var shownHost = monitor.Sources.FirstOrDefault(s => !Same(s.Host, only.Host) && s.Input == only.CurrentInput);
-            if (shownHost != null) return (shownHost.Host, null);
-
-            return (only.Host, (only.Host, only.CurrentInput.Value));
+            var candidates = monitor.Sources
+                .Where(s => s.Input == null && present.Contains(s.Host, StringComparer.OrdinalIgnoreCase))
+                .ToList();
+            if (candidates.Count == 1) return (candidates[0].Host, (candidates[0].Host, live));
         }
 
-        var live = ddc.Select(c => c.CurrentInput).FirstOrDefault(i => i is >= 0 and <= 255);
-        if (live == null) return (ddc[0].Host, null);
-        var owner = ddc.FirstOrDefault(c => monitor.Sources.FirstOrDefault(s => Same(s.Host, c.Host))?.Input == live);
-        return (owner?.Host ?? ddc[0].Host, null);
+        // More than one it could be. Saying nothing costs a round of learning; saying the wrong
+        // thing costs the wiring, and it is believed from then on.
+        return (null, null);
     }
 
     // -- identity --------------------------------------------------------------------------------
