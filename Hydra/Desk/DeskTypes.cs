@@ -32,10 +32,15 @@ public record DeskSnapshot(
     bool IsController,
     // Where the pointer can leave one computer for another, as "NINOG Left Mac". Reported because
     // an empty list here is the difference between a desk that works and one that only looks right.
-    IReadOnlyList<string>? Crossings = null)
+    IReadOnlyList<string>? Crossings = null,
+    // False until the desk has finished a round. The placeholder used before then names this
+    // machine as the one holding the keyboard, because it has to name someone -- and that guess
+    // reads exactly like a fact in every diagnostic, which is worse than saying nothing. A desk
+    // that has not run yet is not a desk with no monitors; it is a desk that has not run yet.
+    bool Ready = true)
 {
     public static DeskSnapshot Empty(string localHost) =>
-        new(localHost, localHost, [localHost], [], [], [], null, true, []);
+        new(localHost, localHost, [localHost], [], [], [], null, true, [], Ready: false);
 }
 
 public record DeskActionResult(bool Accepted, string Message)

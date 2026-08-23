@@ -50,14 +50,26 @@ internal static partial class AgentCommands
             Codesign(shieldPath, ShieldLabel);
         }
 
-        // remove any running instance before overwriting the plist
-        RunLaunchctl($"bootout {DomainTarget()}/{Label}", tolerateFailure: true);
-
         File.WriteAllText(plistPath, GeneratePlist(exePath, workingDir, logDir), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
-        RunLaunchctl($"bootstrap {DomainTarget()} \"{plistPath}\"");
+        foreach (var command in BootstrapSequence(DomainTarget(), Label, plistPath))
+            RunLaunchctl(command, tolerateFailure: !command.StartsWith("bootstrap", StringComparison.Ordinal));
         Console.WriteLine("ScreenFuse agent installed and started.");
     }
+
+    // The order launchd needs, in one place, because getting it wrong fails obscurely.
+    //
+    // "enable" is the step that is easy to leave out and impossible to guess from the error. Being
+    // disabled is recorded in launchd's own database, not in the plist, and it outlives deleting the
+    // file — so an uninstall that disables the job (which it must, or logging in brings it back)
+    // leaves the next install failing with "Bootstrap failed: 5: Input/output error" and nothing
+    // whatsoever to say the job was simply switched off.
+    internal static IReadOnlyList<string> BootstrapSequence(string domain, string label, string plistPath) =>
+    [
+        $"bootout {domain}/{label}",
+        $"enable {domain}/{label}",
+        $"bootstrap {domain} \"{plistPath}\"",
+    ];
 
     // Quitting has to tell launchd, not just exit.
     //

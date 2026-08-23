@@ -129,6 +129,11 @@ public sealed class SceneControlServer(
 
         text.AppendLine($"computer: {s.LocalHost}   controller: {s.Controller}   role: {(s.IsController ? "has the keyboard" : "follows")}");
 
+        if (!s.Ready)
+        {
+            text.AppendLine("  WAIT  the desk has not finished a round yet -- nothing below is settled,");
+            text.AppendLine("        and the role above is a placeholder rather than a fact");
+        }
         text.AppendLine("1. display management");
         Line(s.Monitors.Count > 0, $"{s.Monitors.Count} monitor(s) on the desk");
         foreach (var m in s.Monitors)
