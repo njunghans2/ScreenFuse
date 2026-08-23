@@ -221,6 +221,54 @@ public class TwoComputerDeskTests
     private static string? Returns(Node node) =>
         node.Profile.Hosts.Single(h => h.Name == "Mac").Neighbours.Single().DestScreen;
 
+    // -- switching a monitor ------------------------------------------------------------------------
+
+    [Test]
+    public async Task TheComputerBeingSwitchedToIsWokenFirst()
+    {
+        // A monitor asked for an input nothing is driving finds no signal and goes hunting for one,
+        // which lands it back on the computer it just left -- the switch goes black and undoes
+        // itself a few seconds later. It works whenever that computer happens to be awake already,
+        // which is what makes the missing step look like an intermittent fault instead.
+        using var desk = await Desk.ConvergedAsync();
+        var aorus = await desk.SwitchableAorusAsync();
+
+        await desk.SwitchAsync(aorus, "Mac");
+
+        var woken = desk.Mac.Router.Commands.IndexOf("wake");
+        Assert.That(woken, Is.GreaterThanOrEqualTo(0),
+            "the computer the monitor is being handed to has to be driving that output before the switch");
+    }
+
+    [Test]
+    public async Task TheCrossingsFollowTheMonitorTheMomentItChangesHands()
+    {
+        // The monitor now belongs to someone else, so the pointer crosses somewhere else. Leaving
+        // that to the next round left the crossings pointing at the computer the monitor used to
+        // belong to, and the only way through was to keep moving the mouse until they caught up.
+        using var desk = await Desk.ConvergedAsync();
+        var aorus = await desk.SwitchableAorusAsync();
+
+        var before = desk.Windows.Profile.Hosts
+            .SelectMany(h => h.Neighbours.Select(n => $"{h.Name}|{n.Direction}|{n.DestScreen}"))
+            .OrderBy(x => x, StringComparer.Ordinal).ToList();
+
+        await desk.SwitchAsync(aorus, "Mac");
+
+        var after = desk.Windows.Profile.Hosts
+            .SelectMany(h => h.Neighbours.Select(n => $"{h.Name}|{n.Direction}|{n.DestScreen}"))
+            .OrderBy(x => x, StringComparer.Ordinal).ToList();
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(before, Is.Not.Empty, "pre-condition: the pointer could cross to begin with");
+            Assert.That(after, Is.Not.EqualTo(before),
+                "handing a monitor to the other computer changes where the pointer crosses, and the "
+                + "router has to be told before the user reaches the edge");
+            Assert.That(desk.Windows.Restarts, Is.Zero);
+        }
+    }
+
     private sealed class Desk : IDisposable
     {
         public required Node Windows { get; init; }
@@ -235,6 +283,30 @@ public class TwoComputerDeskTests
         private string MonitorOfWidth(int width) =>
             Windows.Snapshot.Monitors.Single(m => m.Width == width).Id;
 
+
+        // The AORUS with both sockets known, which is what makes it switchable at all. The Mac
+        // cannot read that monitor while Windows is on it, so in real use the code is either learned
+        // the one time the Mac is on screen or entered by hand; either way it ends up here.
+        public async Task<string> SwitchableAorusAsync()
+        {
+            var aorus = Windows.Snapshot.Monitors.Single(m => m.Width == 2560);
+            await Windows.Service.ProbeInputAsync(aorus.Id, "Mac", 17);
+            await Wire.DrainAsync();
+            return aorus.Id;
+        }
+
+        // Drives the wire while the switch is in flight, so the wake request reaches the other
+        // computer and its answer comes back — which is what happens by itself on a real relay.
+        public async Task SwitchAsync(string monitorId, string host)
+        {
+            var switching = Windows.Service.SetMonitorHostAsync(monitorId, host);
+            for (var i = 0; i < 200 && !switching.IsCompleted; i++)
+            {
+                await Wire.DrainAsync();
+                await Task.Delay(10);
+            }
+            await switching;
+        }
         public async Task ArrangeAsync(params (string Id, int X, int Y)[] places)
         {
             var byId = Windows.Snapshot.Monitors.ToDictionary(m => m.Id);
@@ -321,6 +393,7 @@ public class TwoComputerDeskTests
         public required WorldState World { get; init; }
         public required string Directory { get; init; }
         public required IHydraProfile Profile { get; init; }
+        public required StubRouter Router { get; init; }
         public int Restarts;
 
         public DeskSnapshot Snapshot => Service.Snapshot;
@@ -349,16 +422,17 @@ public class TwoComputerDeskTests
                         : null,
                 });
 
+            var router = new StubRouter(monitors);
             var relay = new WiredRelay(name, wire);
             var world = new WorldState();
             var store = new DeskConfigStore(configPath);
             File.WriteAllText(configPath, store.Serialize(Seed(name, mode)));
 
-            var node = new Node { Name = name, Relay = relay, Store = store, Directory = directory, World = world, Profile = profile };
+            var node = new Node { Name = name, Relay = relay, Store = store, Directory = directory, World = world, Profile = profile, Router = router };
             node.Service = new DeskService(
                 profile,
                 new FakeScreenDetector { Snapshot = screens },
-                new StubRouter(monitors),
+                router,
                 relay,
                 world,
                 store,
@@ -457,16 +531,25 @@ public class TwoComputerDeskTests
 
     private sealed class StubRouter(List<PhysicalMonitorInfo> monitors) : IDisplayRouter
     {
+        // What was asked of the hardware, in order, so a test can say "woken, then switched".
+        public List<string> Commands { get; } = [];
+
         public Task<IReadOnlyList<DisplayCommandResult>> ApplyAsync(DisplayRoutingConfig routing, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<DisplayCommandResult>>([]);
         public Task<IReadOnlyList<DisplayCommandResult>> DoctorAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<DisplayCommandResult>>([]);
         public Task<IReadOnlyList<PhysicalMonitorInfo>> InventoryAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<PhysicalMonitorInfo>>(monitors);
-        public Task<DisplayCommandResult> SetInputAsync(string id, int input, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new DisplayCommandResult($"set {id} input {input}", true));
-        public Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new DisplayCommandResult("power", true));
+        public Task<DisplayCommandResult> SetInputAsync(string id, int input, CancellationToken cancellationToken = default)
+        {
+            Commands.Add($"input {id}={input}");
+            return Task.FromResult(new DisplayCommandResult($"set {id} input {input}", true));
+        }
+        public Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default)
+        {
+            Commands.Add(wake ? "wake" : "sleep");
+            return Task.FromResult(new DisplayCommandResult("power", true));
+        }
     }
 
     private sealed class StubScenes : ISceneCoordinator

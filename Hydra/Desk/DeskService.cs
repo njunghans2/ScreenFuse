@@ -442,6 +442,15 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         DeskActionResult result;
         if (target?.Input != null && !string.IsNullOrWhiteSpace(owner) && !string.IsNullOrWhiteSpace(ddcId))
         {
+            // Wake the computer we are switching *to* first, and give it a moment.
+            //
+            // A monitor asked for an input nothing is driving finds no signal and goes hunting for
+            // one, which lands it straight back on the computer it just left -- a switch that goes
+            // black and undoes itself a few seconds later. The same switch works perfectly when that
+            // computer happens to be awake, which is exactly what makes it look intermittent rather
+            // than like the missing step it is.
+            await WakeForSwitchAsync(host, cancel);
+
             result = await SwitchAsync(owner!, ddcId!, target.Input.Value, cancel);
             if (!result.Accepted) result = ExplainSwitchGap(monitor, owner, host, result.Message);
         }
@@ -451,9 +460,58 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         _optimistic[monitorId] = host;
         _snapshot = BuildSnapshot(_snapshot.Monitors
             .Select(m => m.Id == monitorId ? m with { ActiveHost = host } : m).ToList());
+
+        // The monitor now belongs to someone else, so the pointer crosses somewhere else. Derived
+        // and handed over now rather than at the next round: waiting meant the crossings stayed
+        // where the monitor used to be for several seconds, and the only way through was to keep
+        // moving the mouse until they caught up.
+        var rebuilt = RebuildHosts(_config);
+        if (!SameTopology(_config, rebuilt))
+        {
+            _config = rebuilt;
+            ApplyLayout();
+            await PersistAsync(push: true);
+        }
+
         Broadcast();
         Changed?.Invoke();
         return DeskActionResult.Ok($"{monitor.DisplayName()} switched to {host}.");
+    }
+
+    // Asks a computer to drive its displays again, so that a monitor switched to it finds a signal.
+    //
+    // Best effort on purpose: a computer that cannot be reached, or is too old to understand the
+    // request, must not stop the switch. It only ever made things worse to refuse.
+    private async Task WakeForSwitchAsync(string host, CancellationToken cancel)
+    {
+        try
+        {
+            if (host.Equals(LocalName, StringComparison.OrdinalIgnoreCase))
+            {
+                await _router.SetDisplayPowerAsync(wake: true, cancel);
+            }
+            else
+            {
+                var requestId = Guid.NewGuid().ToString("N");
+                var completion = new TaskCompletionSource<DeskSetInputResultMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _pending[requestId] = completion;
+                try
+                {
+                    Send([host], MessageSerializer.Encode(MessageKind.DeskDisplayPower, new DeskDisplayPowerMessage(requestId, Wake: true)));
+                    await completion.Task.WaitAsync(RemoteTimeout, cancel);
+                }
+                finally { _pending.TryRemove(requestId, out _); }
+            }
+
+            // Output does not come back the instant it is asked for. Switching into a signal that is
+            // still arriving is the same as switching into no signal at all.
+            var settle = _config.Profiles.FirstOrDefault()?.DisplayRouting.SettleDelayMs ?? 500;
+            if (settle > 0) await Task.Delay(settle, cancel);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _log.LogDebug(ex, "Could not wake {Host} before switching a monitor to it", host);
+        }
     }
 
     // Explains what is missing and what to do about it.
