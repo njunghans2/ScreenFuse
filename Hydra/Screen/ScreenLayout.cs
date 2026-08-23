@@ -58,7 +58,26 @@ public class ScreenLayout(List<ScreenRect> screens, List<HostConfig> configs, in
                 }
 
                 var dest = filteredDests.FirstOrDefault();
-                if (dest is null) continue;
+                if (dest is null)
+                {
+                    // A computer that has not reported yet is a placeholder, not a fault; the router
+                    // already says it is waiting, and the layout is rebuilt when the screens arrive.
+                    if (destScreens.All(s => s.Width == 0 || s.Height == 0)) continue;
+
+                    // Said out loud. A crossing whose destination cannot be found is dropped here,
+                    // and dropping it in silence is indistinguishable from the desk being wrong:
+                    // both computers report the crossing, agree with each other, and the pointer
+                    // still cannot leave. The usual cause is an identifier one computer uses for a
+                    // screen that the other never sent.
+                    log.LogWarning(
+                        "Crossing {Source} {Direction} {Host} goes nowhere: no screen matches '{Dest}' (it reports: {Known})",
+                        config.Name, neighbour.Direction, neighbour.Name,
+                        neighbour.DestScreen ?? "(any)",
+                        destScreens.Count == 0
+                            ? "nothing yet"
+                            : string.Join(", ", destScreens.Select(s => s.Identity?.DisplayName ?? s.Identity?.Output ?? s.Name)));
+                    continue;
+                }
 
                 var srcStart = Math.Clamp(neighbour.SourceStart, 0, 100) / 100f;
                 var srcEnd = Math.Clamp(neighbour.SourceEnd, 0, 100) / 100f;

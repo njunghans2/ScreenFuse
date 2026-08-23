@@ -54,7 +54,14 @@ public enum MessageKind : byte
 
 public record MouseMoveMessage(string Screen, int X, int Y);
 public record MouseMoveDeltaMessage(int Dx, int Dy);
-public record ScreenInfoEntry(string Name, int X, int Y, int Width, int Height, decimal MouseScale, decimal? RelativeMouseScale = null);
+// Output/DisplayName/PlatformId travel with the geometry so the computer holding the keyboard can
+// recognise a remote screen by the names its owner uses for it. Without them a remote screen has
+// only its position and an index-based name, and a crossing that names any other identifier — which
+// is the only kind that survives a display being plugged in or removed — matches nothing at all and
+// is quietly dropped.
+public record ScreenInfoEntry(
+    string Name, int X, int Y, int Width, int Height, decimal MouseScale, decimal? RelativeMouseScale = null,
+    string? Output = null, string? DisplayName = null, string? PlatformId = null);
 
 // ReSharper disable once InconsistentNaming
 public enum PeerPlatform : byte { Unknown = 0, Linux = 1, MacOS = 2, Windows = 3 }

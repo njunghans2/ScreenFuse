@@ -644,7 +644,17 @@ public class InputRouter(
                 for (var j = entries.Count - 1; j >= 0; j--)
                 {
                     var e = entries[j];
-                    screens.Insert(i, new ScreenRect(e.Name, screen.Host, e.X, e.Y, e.Width, e.Height, IsLocal: false));
+                    // Carry the identity across. A crossing names the screen it arrives on, and that
+                    // name is one the remote computer uses — so without this the destination
+                    // resolves to nothing and the crossing is dropped without a word.
+                    screens.Insert(i, new ScreenRect(e.Name, screen.Host, e.X, e.Y, e.Width, e.Height, IsLocal: false,
+                        new ScreenIdentity
+                        {
+                            ScreenName = e.Name,
+                            Output = e.Output,
+                            DisplayName = e.DisplayName,
+                            PlatformId = e.PlatformId,
+                        }));
                 }
             }
         }

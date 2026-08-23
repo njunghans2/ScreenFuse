@@ -112,7 +112,9 @@ public abstract class ScreenDetector : SimpleHostedService, IScreenDetector
                 PlatformId = d.PlatformId,
             };
             screens.Add(new ScreenRect(name, _profile.Name, d.X, d.Y, d.Width, d.Height, IsLocal: true, Identity: identity));
-            entries.Add(new ScreenInfoEntry(name, d.X - minX, d.Y - minY, d.Width, d.Height, scale, ResolveRelativeScale(d)));
+            entries.Add(new ScreenInfoEntry(
+                name, d.X - minX, d.Y - minY, d.Width, d.Height, scale, ResolveRelativeScale(d),
+                d.OutputName, d.DisplayName, d.PlatformId));
         }
 
         return new LocalScreenSnapshot(screens, entries);
