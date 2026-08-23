@@ -522,6 +522,13 @@ public sealed class DeskService : SimpleHostedService, IDeskService
 
             _config = WithMonitors(_config, monitors);
             _config = RebuildHosts(_config);
+            // Handed to the router here, not merely written. Rebuilding and persisting without this
+            // left the new crossings sitting in the file while the pointer went on using the old
+            // ones, so moving a monitor did nothing until the agent was restarted — and the desk on
+            // screen disagreed with the desk you could feel. Recompute cannot do it either: it
+            // applies only when the derived layout differs from the stored one, and by this point
+            // they are the same.
+            ApplyLayout();
             await PersistAsync(push: true);
         }
         finally { _gate.Release(); }
