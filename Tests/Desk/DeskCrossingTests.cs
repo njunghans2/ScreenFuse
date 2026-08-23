@@ -20,8 +20,50 @@ public class DeskCrossingTests
     private static List<DeskArrangement.Placed> Place(IReadOnlyList<DeskMonitorConfig> desk) =>
         DeskArrangement.Place(desk, id => desk.First(m => m.Id == id).Sources[0].Host);
 
+    // The arrangement the user actually built: the MacBook's screen dragged in between the two
+    // Windows monitors. One computer is then on the right at one of the other's monitors and on the
+    // left at the other, which a single crossing per pair of computers cannot express — so the
+    // pointer kept leaving on the left whichever way the desk was arranged.
+    private static List<DeskMonitorConfig> Sandwich() =>
+    [
+        Monitor("aorus", "AORUS", 0, 0, 2560, 1440, "NINOG"),
+        Monitor("built-in", "Built-in Retina Display", 2700, 300, 1352, 878, "Mac"),
+        Monitor("benq", "BenQ XL2420T", 4200, 300, 1920, 1080, "NINOG"),
+    ];
+
     [Test]
-    public void ACrossingNamesNoScreen()
+    public void AScreenBetweenTwoOthersIsReachedFromBothSides()
+    {
+        var desk = Sandwich();
+        var hosts = DeskArrangement.BuildHosts(Place(desk), ["NINOG", "Mac"]);
+
+        var ninog = hosts.Single(h => h.Name == "NINOG");
+        var toMac = ninog.Neighbours.Where(n => n.Name == "Mac").ToList();
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(toMac.Select(n => n.Direction), Does.Contain(Direction.Right),
+                "from the AORUS the Mac is to the right");
+            Assert.That(toMac.Select(n => n.Direction), Does.Contain(Direction.Left),
+                "from the BenQ the Mac is to the left");
+            Assert.That(toMac.Select(n => n.SourceScreen).Distinct().Count(), Is.EqualTo(2),
+                "the two crossings leave from different screens");
+        }
+    }
+
+    [Test]
+    public void TheScreenInTheMiddleCanGetBackToBoth()
+    {
+        var desk = Sandwich();
+        var hosts = DeskArrangement.BuildHosts(Place(desk), ["NINOG", "Mac"]);
+
+        var mac = hosts.Single(h => h.Name == "Mac");
+        Assert.That(mac.Neighbours.Select(n => n.Direction), Is.EquivalentTo(new[] { Direction.Left, Direction.Right }),
+            "a screen in the middle has a computer on either side of it");
+    }
+
+    [Test]
+    public void ACrossingNamesTheScreenItLeavesFrom()
     {
         var hosts = DeskArrangement.BuildHosts(Place(Desk()), ["NINOG", "Mac"]);
 
@@ -29,53 +71,55 @@ public class DeskCrossingTests
         Assert.That(neighbours, Is.Not.Empty);
         using (Assert.EnterMultipleScope())
         {
-            Assert.That(neighbours.Select(n => n.SourceScreen), Is.All.Null,
-                "the outermost screen belongs to the operating system, not to the desk");
-            Assert.That(neighbours.Select(n => n.DestScreen), Is.All.Null);
+            Assert.That(neighbours.Select(n => n.SourceScreen), Is.All.Not.Null,
+                "which screen the pointer leaves from is decided by the desk, not by the operating system");
+            Assert.That(neighbours.Select(n => n.DestScreen), Is.All.Not.Null);
         }
     }
 
     [Test]
-    public void TwoComputersGetExactlyOneCrossingBetweenThem()
+    public void EveryCrossingIsWrittenOutRatherThanMirrored()
     {
         var hosts = DeskArrangement.BuildHosts(Place(Desk()), ["NINOG", "Mac"]);
 
         var neighbours = hosts.SelectMany(h => h.Neighbours).ToList();
         using (Assert.EnterMultipleScope())
         {
-            Assert.That(neighbours, Has.Count.EqualTo(1));
-            Assert.That(neighbours[0].Mirror, Is.True, "the way back is derived from the way out");
+            Assert.That(neighbours, Is.Not.Empty);
+            Assert.That(neighbours.Select(n => n.Mirror), Is.All.False,
+                "both ways round are derived independently; a mirrored guess lands the pointer at the "
+                + "wrong height between monitors of different sizes");
         }
     }
 
     [Test]
-    public void TheCrossingFollowsTheLongestSharedEdge()
+    public void OneScreenCanReachAnotherComputerInTwoDirectionsAtOnce()
     {
-        // The AORUS shares 1080px with the BenQ on its right and 878px with the built-in on its
-        // left, so right is the direction the arrangement is really expressing.
+        // In this desk the AORUS has a Mac monitor on either side of it, so it needs a crossing both
+        // ways. One crossing per pair of computers could only ever have said one of them.
         var hosts = DeskArrangement.BuildHosts(Place(Desk()), ["NINOG", "Mac"]);
 
         var ninog = hosts.Single(h => h.Name == "NINOG");
         using (Assert.EnterMultipleScope())
         {
-            Assert.That(ninog.Neighbours, Has.Count.EqualTo(1));
-            Assert.That(ninog.Neighbours[0].Direction, Is.EqualTo(Direction.Right));
-            Assert.That(ninog.Neighbours[0].Name, Is.EqualTo("Mac"));
+            Assert.That(ninog.Neighbours, Has.Count.EqualTo(2));
+            Assert.That(ninog.Neighbours.Select(n => n.Direction), Is.EquivalentTo(new[] { Direction.Left, Direction.Right }));
+            Assert.That(ninog.Neighbours.Select(n => n.Name), Is.All.EqualTo("Mac"));
         }
     }
 
     [Test]
-    public void TheReturnPathExistsOnceMirrorsAreExpanded()
+    public void TheWayBackExistsFromEveryScreenThatCanBeReached()
     {
         var hosts = DeskArrangement.BuildHosts(Place(Desk()), ["NINOG", "Mac"]);
-        HydraConfig.ExpandMirrors(hosts);
 
         var mac = hosts.Single(h => h.Name == "Mac");
         using (Assert.EnterMultipleScope())
         {
-            Assert.That(mac.Neighbours, Has.Count.EqualTo(1));
-            Assert.That(mac.Neighbours[0].Direction, Is.EqualTo(Direction.Left));
-            Assert.That(mac.Neighbours[0].Name, Is.EqualTo("NINOG"));
+            Assert.That(mac.Neighbours, Is.Not.Empty, "the pointer has to be able to come back");
+            Assert.That(mac.Neighbours.Select(n => n.Name), Is.All.EqualTo("NINOG"));
+            Assert.That(mac.Neighbours.Select(n => n.SourceScreen).Distinct().Count(), Is.EqualTo(2),
+                "each of the Mac's screens returns from its own edge");
         }
     }
 
@@ -143,6 +187,8 @@ public class DeskCrossingTests
     private static DeskMonitorConfig Monitor(string id, string label, int x, int y, int w, int h, string host) => new()
     {
         Id = id, Label = label, Aliases = [label], DeskX = x, DeskY = y, Width = w, Height = h,
-        Sources = [new MonitorSourceConfig { Host = host, Input = 15 }],
+        // The screen identifier matters here: a crossing names the screen it leaves from, and two
+        // crossings from the same computer are only distinguishable by it.
+        Sources = [new MonitorSourceConfig { Host = host, Input = 15, ScreenId = $"{host}:{id}" }],
     };
 }

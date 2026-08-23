@@ -79,7 +79,39 @@ public sealed class DeskConfigStore(string configPath)
     // Everything about the desk that every computer is meant to agree on. Compared rather than
     // trusted: a follower that restarted, or that missed the one push it was ever sent, otherwise
     // keeps a stale desk forever with nothing to reveal it.
-    public static string Fingerprint(HydraConfigFile file) => $"{Describe(file)}||{DescribeRuntime(file)}";
+    public static string Fingerprint(HydraConfigFile file) =>
+        $"{Describe(file)}||{DescribeRuntime(file)}||{DescribeEdges(file)}";
+
+    // The crossings, for deciding whether two computers hold the same document. Deliberately not
+    // part of SameRuntime: those are different questions, and conflating them means either a desk
+    // that restarts whenever it is rearranged, or one whose rearrangement never reaches the other
+    // computer at all.
+    private static string DescribeEdges(HydraConfigFile file) => string.Join('|', file.Profiles
+        .OrderBy(p => p.ProfileName, StringComparer.OrdinalIgnoreCase)
+        .Select(p => string.Join(',', Expanded(p)
+            .SelectMany(h => h.Neighbours.Select(n =>
+                $"{h.Name}>{n.Direction}>{n.Name}>{n.SourceScreen}>{n.DestScreen}>{n.SourceStart}-{n.SourceEnd}>{n.DestStart}-{n.DestEnd}"
+                    .ToLowerInvariant()))
+            .Distinct()
+            .OrderBy(s => s, StringComparer.Ordinal))));
+
+    private static List<HostConfig> Expanded(HydraConfig profile)
+    {
+        var hosts = profile.Hosts.Select(h => new HostConfig
+        {
+            Name = h.Name,
+            DeadCorners = h.DeadCorners,
+            Neighbours = h.Neighbours.Select(n => new NeighbourConfig
+            {
+                Direction = n.Direction, Name = n.Name, Mirror = n.Mirror,
+                SourceScreen = n.SourceScreen, DestScreen = n.DestScreen,
+                SourceStart = n.SourceStart, SourceEnd = n.SourceEnd,
+                DestStart = n.DestStart, DestEnd = n.DestEnd,
+            }).ToList(),
+        }).ToList();
+        HydraConfig.ExpandMirrors(hosts);
+        return hosts;
+    }
 
     public static bool SameDesk(HydraConfigFile a, HydraConfigFile b) =>
         Describe(a) == Describe(b);

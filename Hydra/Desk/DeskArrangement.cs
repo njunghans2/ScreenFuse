@@ -6,15 +6,11 @@ namespace Hydra.Desk;
 // Turns the arranged desk into the crossing edges the input router already understands.
 //
 // The user arranges physical monitors, not computers. Which computer a monitor shows is a separate,
-// per-scene decision — so the edges are derived, not authored: two monitors that touch on the desk
-// become a crossing only while different computers are on them, and the shared portion of the
-// touching edge becomes the percentage range so the pointer comes out where it went in.
+// per-scene decision, so the edges are derived rather than authored: two monitors on different
+// computers become a crossing, and the span they face each other across becomes the percentage
+// range, so the pointer comes out where it went in.
 public static class DeskArrangement
 {
-    // Monitors rarely line up to the pixel after a drag, and a one-pixel gap would silently kill a
-    // crossing. Anything closer than this counts as touching.
-    private const int Tolerance = 24;
-
     public record Placed(string MonitorId, string Host, string? ScreenId, int X, int Y, int Width, int Height)
     {
         public int Right => X + Width;
@@ -36,18 +32,18 @@ public static class DeskArrangement
         return placed;
     }
 
-    // Crossings are between computers, not between monitors, and they deliberately name no screen.
+    // A crossing names the screen it leaves from and the screen it arrives on.
     //
-    // Naming one is what broke the pointer. A crossing is only reachable at the outer edge of the
-    // computer's own desktop, and which monitor that is belongs to the operating system, not to the
-    // desk: a monitor currently showing another computer is still a live display on this one — the
-    // video link stays up even when the panel is showing a different input — so the desk's idea of
-    // who owns a monitor says nothing about where a computer's desktop ends. Anchoring a crossing to
-    // "the monitor the Mac is on" put it on an edge in the middle of Windows' desktop, where the
-    // pointer simply moves to the next Windows screen and never leaves.
+    // Per computer is not enough. Put one computer's monitor between two of another's, which is a
+    // perfectly ordinary desk, and that computer is on the right at one of them and on the left at
+    // the other. A single direction per pair of computers cannot say both, so whichever the user
+    // meant is lost.
     //
-    // Leaving the screens unset hands that decision back to the input router, which already picks
-    // the outermost screen for the direction out of the live layout.
+    // The screen comes from the desk, not from the operating system's own arrangement. That is the
+    // point: a monitor placed between two others takes the pointer even though the operating system
+    // would have moved it to its own next screen. An earlier attempt failed not because naming
+    // screens was wrong, but because it named them from which computer was *showing* on each
+    // monitor, which is a different question and was usually the wrong answer.
     public static List<HostConfig> BuildHosts(IReadOnlyList<Placed> placed, IEnumerable<string> allHosts)
     {
         var hosts = new Dictionary<string, HostConfig>(StringComparer.OrdinalIgnoreCase);
@@ -55,18 +51,24 @@ public static class DeskArrangement
             if (!string.IsNullOrWhiteSpace(name) && !hosts.ContainsKey(name))
                 hosts[name] = new HostConfig { Name = name };
 
-        // Which side of which, and how squarely — for every pair of monitors on different computers.
+        // Which side of which, and how squarely, for every pair of monitors on different computers.
         //
         // Position decides this, not contact. Two monitors with a gap between them are still one to
-        // the left of the other, exactly as they are on the desk, and the pointer should cross
+        // the left of the other, exactly as they sit on the desk, and the pointer should cross
         // between them; requiring them to touch made a perfectly sensible arrangement do nothing.
-        // Facing edge length is what ranks the candidates, with the closer pair breaking a tie.
-        var shared = new Dictionary<(string From, string To, Direction Dir), (int Facing, int Gap)>();
-        void Note(string from, string to, Direction dir, int facing, int gap)
+        // The monitor facing most squarely wins, and the nearer one breaks a tie.
+        var best = new Dictionary<(string FromScreen, string To, Direction Dir), (string From, Edge Edge)>();
+
+        void Note(Placed a, Placed b, Direction dir, Edge edge)
         {
-            var key = (from, to, dir);
-            var current = shared.GetValueOrDefault(key);
-            shared[key] = (current.Facing + facing, current.Facing == 0 ? gap : Math.Min(current.Gap, gap));
+            // Keyed by the source screen, so one computer can reach another from more than one of
+            // its own monitors, in a different direction from each.
+            var key = (a.Host + " " + (a.ScreenId ?? a.MonitorId), b.Host, dir);
+            if (best.TryGetValue(key, out var current)
+                && (current.Edge.Facing > edge.Facing
+                    || (current.Edge.Facing == edge.Facing && current.Edge.Gap <= edge.Gap)))
+                return;
+            best[key] = (a.Host, edge);
         }
 
         foreach (var a in placed)
@@ -81,44 +83,66 @@ public static class DeskArrangement
                 // Side by side: they face each other across whatever vertical span they share.
                 if (bottom > top)
                 {
-                    if (b.X >= a.Right) Note(a.Host, b.Host, Direction.Right, bottom - top, b.X - a.Right);
-                    else if (b.Right <= a.X) Note(a.Host, b.Host, Direction.Left, bottom - top, a.X - b.Right);
+                    if (b.X >= a.Right)
+                        Note(a, b, Direction.Right, Span(a, b, top, bottom, bottom - top, b.X - a.Right, vertical: true));
+                    else if (b.Right <= a.X)
+                        Note(a, b, Direction.Left, Span(a, b, top, bottom, bottom - top, a.X - b.Right, vertical: true));
                 }
 
-                // Stacked: same idea, turned ninety degrees.
+                // Stacked: the same idea turned ninety degrees.
                 if (right > left)
                 {
-                    if (b.Y >= a.Bottom) Note(a.Host, b.Host, Direction.Down, right - left, b.Y - a.Bottom);
-                    else if (b.Bottom <= a.Y) Note(a.Host, b.Host, Direction.Up, right - left, a.Y - b.Bottom);
+                    if (b.Y >= a.Bottom)
+                        Note(a, b, Direction.Down, Span(a, b, left, right, right - left, b.Y - a.Bottom, vertical: false));
+                    else if (b.Bottom <= a.Y)
+                        Note(a, b, Direction.Up, Span(a, b, left, right, right - left, a.Y - b.Bottom, vertical: false));
                 }
             }
         }
 
-        // One crossing per pair of computers, in the direction they share the most edge. Mirror is
-        // on so the way back is derived rather than stated twice — and so a computer with monitors
-        // on both sides of another still gets a working return path.
-        foreach (var group in shared.GroupBy(e => Unordered(e.Key.From, e.Key.To)))
+        foreach (var ((_, to, dir), (from, edge)) in best)
         {
-            var best = group
-                .OrderByDescending(e => e.Value.Facing)
-                .ThenBy(e => e.Value.Gap)
-                .First();
-            var (from, to, dir) = best.Key;
-            var host = hosts[from];
-            if (host.Neighbours.Any(n => n.Name.Equals(to, StringComparison.OrdinalIgnoreCase))) continue;
-            if (hosts[to].Neighbours.Any(n => n.Name.Equals(from, StringComparison.OrdinalIgnoreCase))) continue;
-            host.Neighbours.Add(new NeighbourConfig { Direction = dir, Name = to, Mirror = true });
+            hosts[from].Neighbours.Add(new NeighbourConfig
+            {
+                Direction = dir,
+                Name = to,
+                SourceScreen = edge.SourceScreen,
+                DestScreen = edge.DestScreen,
+                SourceStart = edge.SourceStart,
+                SourceEnd = edge.SourceEnd,
+                DestStart = edge.DestStart,
+                DestEnd = edge.DestEnd,
+                // Both directions are derived independently and precisely; a mirrored guess would
+                // land the pointer at the wrong height between monitors of different sizes.
+                Mirror = false,
+            });
         }
 
         return hosts.Values.ToList();
     }
 
-    private static bool Touching(int edge, int other) => Math.Abs(edge - other) <= Tolerance;
-
     private static (int Start, int End) Overlap(int aStart, int aEnd, int bStart, int bEnd) =>
         (Math.Max(aStart, bStart), Math.Min(aEnd, bEnd));
 
-    private static (string, string) Unordered(string a, string b) =>
-        string.Compare(a, b, StringComparison.OrdinalIgnoreCase) <= 0 ? (a, b) : (b, a);
+    // One crossing: which screens, and which part of each facing edge it covers. The shared span is
+    // expressed as a percentage of each monitor separately, so the pointer leaves a monitor of one
+    // size at the height it enters a monitor of another.
+    private record Edge(
+        string? SourceScreen, string? DestScreen,
+        int SourceStart, int SourceEnd, int DestStart, int DestEnd,
+        int Facing, int Gap);
 
+    private static Edge Span(Placed a, Placed b, int start, int end, int facing, int gap, bool vertical)
+    {
+        var (aOrigin, aSize) = vertical ? (a.Y, a.Height) : (a.X, a.Width);
+        var (bOrigin, bSize) = vertical ? (b.Y, b.Height) : (b.X, b.Width);
+        return new Edge(
+            a.ScreenId, b.ScreenId,
+            Percent(start - aOrigin, aSize), Percent(end - aOrigin, aSize),
+            Percent(start - bOrigin, bSize), Percent(end - bOrigin, bSize),
+            facing, gap);
+    }
+
+    private static int Percent(int offset, int size) =>
+        size <= 0 ? 0 : Math.Clamp((int)Math.Round(offset * 100.0 / size), 0, 100);
 }

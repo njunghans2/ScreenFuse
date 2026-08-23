@@ -87,16 +87,24 @@ public class TwoComputerDeskTests
     }
 
     [Test]
-    public async Task TheCrossingIsWrittenBetweenComputersWithNoScreenNamed()
+    public async Task EveryCrossingNamesRealScreensOnBothSides()
     {
         using var desk = await Desk.ConvergedAsync();
 
         var neighbours = desk.Windows.Config.Profiles.SelectMany(p => p.Hosts).SelectMany(h => h.Neighbours).ToList();
         Assert.That(neighbours, Is.Not.Empty, "the pointer needs somewhere to cross");
+
+        // The identifiers have to be ones the computers actually use for their screens, or the
+        // router matches nothing and the crossing silently does not exist.
+        var known = desk.Windows.Snapshot.Monitors
+            .SelectMany(m => m.Sources)
+            .Select(s => s.Host)
+            .ToList();
         using (Assert.EnterMultipleScope())
         {
-            Assert.That(neighbours.Select(n => n.SourceScreen), Is.All.Null);
-            Assert.That(neighbours.Select(n => n.DestScreen), Is.All.Null);
+            Assert.That(neighbours.Select(n => n.SourceScreen), Is.All.Not.Null);
+            Assert.That(neighbours.Select(n => n.DestScreen), Is.All.Not.Null);
+            Assert.That(known, Is.Not.Empty);
         }
     }
 
