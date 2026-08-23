@@ -130,11 +130,120 @@ public class TwoComputerDeskTests
 
     // -- harness ---------------------------------------------------------------------------------
 
+    // -- rearranging ------------------------------------------------------------------------------
+    //
+    // Moving a monitor did nothing until the agent was restarted. Saving rebuilt the crossings and
+    // wrote them to the config, and then stopped; the router went on reading the layout it was
+    // handed at startup, so the desk drawn on screen and the desk the pointer could feel disagreed.
+    // Recompute could not cover it either — it applies the derived layout only when it differs from
+    // the stored one, and saving has just made them the same.
+
+    [Test]
+    public async Task MovingAMonitorChangesTheCrossingsWithoutARestart()
+    {
+        using var desk = await Desk.ConvergedAsync();
+
+        var before = Crossings(desk.Windows);
+
+        // The built-in moved from the far left to between the two Windows screens.
+        await desk.ArrangeAsync((desk.Aorus, 0, 0), (desk.BuiltIn, 2700, 300), (desk.Benq, 4200, 300));
+
+        var after = Crossings(desk.Windows);
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(after, Is.Not.EqualTo(before),
+                "the router has to be handed the new layout the moment the desk changes");
+            Assert.That(after, Does.Contain("Mac|Left|NINOG"));
+            Assert.That(after, Does.Contain("Mac|Right|NINOG"),
+                "a screen placed between two others has one of them on either side");
+            Assert.That(desk.Windows.Restarts, Is.Zero, "nothing should need restarting to move a monitor");
+        }
+    }
+
+    [Test]
+    public async Task SwappingTwoMonitorsChangesWhichOneTheCrossingComesBackTo()
+    {
+        using var desk = await Desk.ConvergedAsync();
+
+        await desk.ArrangeAsync((desk.Benq, 0, 0), (desk.Aorus, 2000, 0), (desk.BuiltIn, 4700, 0));
+        var nextToAorus = Returns(desk.Windows);
+
+        await desk.ArrangeAsync((desk.Aorus, 0, 0), (desk.Benq, 2700, 0), (desk.BuiltIn, 4700, 0));
+        var nextToBenq = Returns(desk.Windows);
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(nextToAorus, Is.EqualTo(@"\\.\DISPLAY1"));
+            Assert.That(nextToBenq, Is.EqualTo(@"\\.\DISPLAY2"),
+                "swapping the two has to change which monitor the pointer comes back to, right away");
+        }
+    }
+
+    [Test]
+    public async Task ThePointerDoesNotJumpOverTheMonitorInBetween()
+    {
+        using var desk = await Desk.ConvergedAsync();
+
+        await desk.ArrangeAsync((desk.Benq, 0, 0), (desk.Aorus, 1920, 0), (desk.BuiltIn, 4480, 0));
+
+        var out_ = desk.Windows.Profile.Hosts.Single(h => h.Name == "NINOG").Neighbours;
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(out_, Has.Count.EqualTo(1),
+                "only the AORUS touches the Mac; the BenQ has the AORUS in front of it");
+            Assert.That(out_[0].SourceScreen, Is.EqualTo(@"\\.\DISPLAY1"));
+        }
+    }
+
+    [Test]
+    public async Task TheOtherComputerIsRearrangedTooWithoutBeingRestarted()
+    {
+        // The follower has to end up with the same crossings, or the pointer goes one way and
+        // cannot come back — which reads exactly like the arrangement being ignored.
+        using var desk = await Desk.ConvergedAsync();
+
+        await desk.ArrangeAsync((desk.Aorus, 0, 0), (desk.BuiltIn, 2700, 300), (desk.Benq, 4200, 300));
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(Crossings(desk.Mac), Is.EqualTo(Crossings(desk.Windows)));
+            Assert.That(desk.Mac.Restarts, Is.Zero);
+        }
+    }
+
+    private static List<string> Crossings(Node node) => node.Profile.Hosts
+        .SelectMany(h => h.Neighbours.Select(n => $"{h.Name}|{n.Direction}|{n.Name}"))
+        .Distinct()
+        .OrderBy(s => s, StringComparer.Ordinal)
+        .ToList();
+
+    // Where the pointer lands when it comes back off the Mac.
+    private static string? Returns(Node node) =>
+        node.Profile.Hosts.Single(h => h.Name == "Mac").Neighbours.Single().DestScreen;
+
     private sealed class Desk : IDisposable
     {
         public required Node Windows { get; init; }
         public required Node Mac { get; init; }
         public required Wire Wire { get; init; }
+
+        // The three monitors by the only thing that tells them apart here: their size.
+        public string Aorus => MonitorOfWidth(2560);
+        public string Benq => MonitorOfWidth(1920);
+        public string BuiltIn => MonitorOfWidth(1352);
+
+        private string MonitorOfWidth(int width) =>
+            Windows.Snapshot.Monitors.Single(m => m.Width == width).Id;
+
+        public async Task ArrangeAsync(params (string Id, int X, int Y)[] places)
+        {
+            var byId = Windows.Snapshot.Monitors.ToDictionary(m => m.Id);
+            await Windows.Service.SaveArrangementAsync(places
+                .Select(p => new DeskPlacement(p.Id, p.X, p.Y, byId[p.Id].Width, byId[p.Id].Height))
+                .ToList());
+            await Wire.DrainAsync();
+            await PumpAsync();
+        }
 
         public static async Task<Desk> ConvergedAsync(bool announcePeers = true)
         {
@@ -211,6 +320,7 @@ public class TwoComputerDeskTests
         public required DeskConfigStore Store { get; init; }
         public required WorldState World { get; init; }
         public required string Directory { get; init; }
+        public required IHydraProfile Profile { get; init; }
         public int Restarts;
 
         public DeskSnapshot Snapshot => Service.Snapshot;
@@ -244,7 +354,7 @@ public class TwoComputerDeskTests
             var store = new DeskConfigStore(configPath);
             File.WriteAllText(configPath, store.Serialize(Seed(name, mode)));
 
-            var node = new Node { Name = name, Relay = relay, Store = store, Directory = directory, World = world };
+            var node = new Node { Name = name, Relay = relay, Store = store, Directory = directory, World = world, Profile = profile };
             node.Service = new DeskService(
                 profile,
                 new FakeScreenDetector { Snapshot = screens },
