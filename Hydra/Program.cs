@@ -498,9 +498,13 @@ if (config != null)
     services.AddSingleton(controllerStore);
     services.AddSingleton<IDeskService, DeskService>();
     services.AddHostedService(sp => (DeskService)sp.GetRequiredService<IDeskService>());
-    if (profile.Mode == Mode.Master && configFile.Profile == null)
+    // Every computer answers, not just the one holding the keyboard. It is loopback-only, and a desk
+    // that misbehaves is almost always two computers disagreeing — which cannot be seen at all if
+    // only one of them can be asked what it thinks.
+    if (configFile.Profile == null)
         services.AddHostedService(sp => new SceneControlServer(
             sp.GetRequiredService<ISceneCoordinator>(),
+            sp.GetRequiredService<IDeskService>(),
             configFile.ControlPort,
             sp.GetRequiredService<ILogger<SceneControlServer>>()));
 }

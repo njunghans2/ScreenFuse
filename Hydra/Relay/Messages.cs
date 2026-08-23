@@ -49,6 +49,7 @@ public enum MessageKind : byte
     DeskConfigPush = 38,        // controller → all: the shared desk document (arrangement, monitors, scenes)
     DeskDisplayPower = 39,      // controller → peer: stop or resume your video output, so a monitor's
                                 //   automatic input detection follows the signal (no DDC required)
+    DeskConfigRequest = 40,     // follower → controller: my desk document differs from yours, send it
 }
 
 public record MouseMoveMessage(string Screen, int X, int Y);
@@ -106,12 +107,14 @@ public record DeskScreenReport(
 public record DeskInventoryMessage(List<DeskMonitorReport> Monitors, List<DeskScreenReport> Screens);
 public record DeskSetInputMessage(string RequestId, string DdcId, int Input);
 public record DeskDisplayPowerMessage(string RequestId, bool Wake);
+public record DeskConfigRequestMessage;
 public record DeskSetInputResultMessage(string RequestId, bool Success, string? Detail);
 public record DeskStateMonitor(
     string Id, string Label, int DeskX, int DeskY, int Width, int Height,
     string? ActiveHost, List<DeskStateSource> Sources);
 public record DeskStateSource(string Host, int? Input, bool Reachable, List<int>? AvailableInputs = null);
 public record DeskStateMessage(
+    string? Fingerprint,
     string Controller, List<string> Hosts, List<string> ConnectedHosts,
     List<DeskStateMonitor> Monitors, List<string> Scenes, string? CurrentScene);
 public enum DeskCommandKind : byte { SetMonitorHost = 1, SetController = 2, SaveScene = 3, ActivateScene = 4, ProbeInput = 5, SaveArrangement = 6, DeleteScene = 7 }

@@ -76,6 +76,11 @@ public sealed class DeskConfigStore(string configPath)
 
     // True when the pushed desk would not change anything here — used to avoid a restart loop where
     // two computers keep pushing equivalent documents at each other.
+    // Everything about the desk that every computer is meant to agree on. Compared rather than
+    // trusted: a follower that restarted, or that missed the one push it was ever sent, otherwise
+    // keeps a stale desk forever with nothing to reveal it.
+    public static string Fingerprint(HydraConfigFile file) => $"{Describe(file)}||{DescribeRuntime(file)}";
+
     public static bool SameDesk(HydraConfigFile a, HydraConfigFile b) =>
         Describe(a) == Describe(b);
 

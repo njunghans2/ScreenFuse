@@ -276,7 +276,16 @@ public class SlaveRelayConnection : RelayConnection
                 await _fileTransfer.OnMessageAsync(sourceHost, kind, body, this);
                 break;
             default:
-                _log.LogDebug("Unhandled message kind {Kind} from {Host}", kind, sourceHost);
+                // Hand anything this connection does not consume itself to whoever is listening.
+                //
+                // Without this the override swallows every message the switch above does not name,
+                // and MessageReceived — which the base class raises — never fires on a computer that
+                // is following. Everything built on it was therefore one-way: the desk arrived at the
+                // computer holding the keyboard and never came back, so a follower showed no
+                // monitors, never received the shared settings, could not be asked to switch one of
+                // its inputs, and never heard a scene change. It looked like the desk was broken,
+                // and it was just deaf.
+                await base.OnReceive(sourceHost, kind, body);
                 break;
         }
     }

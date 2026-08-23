@@ -6,7 +6,11 @@ using Microsoft.Extensions.Logging;
 
 namespace Hydra.Scenes;
 
-public sealed class SceneControlServer(ISceneCoordinator scenes, int port, ILogger<SceneControlServer> log) : BackgroundService
+public sealed class SceneControlServer(
+    ISceneCoordinator scenes,
+    Hydra.Desk.IDeskService desk,
+    int port,
+    ILogger<SceneControlServer> log) : BackgroundService
 {
     private readonly HttpListener _listener = new();
 
@@ -57,7 +61,44 @@ public sealed class SceneControlServer(ISceneCoordinator scenes, int port, ILogg
             }
             if (request.HttpMethod == "GET" && request.Url?.AbsolutePath is "/" or "/api/status")
             {
-                await WriteJsonAsync(context.Response, 200, new { currentScene = scenes.CurrentScene, scenes = scenes.AvailableScenes, connectedPeers = scenes.ConnectedPeers, expectedPeers = scenes.ExpectedPeers }, cancellationToken);
+                // The whole desk as this computer sees it. Both computers answer the same question
+                // the same way, so the two can be compared directly — which is the only way to tell
+                // "the desk is wrong" apart from "the desk is fine and this computer disagrees".
+                var snapshot = desk.Snapshot;
+                await WriteJsonAsync(context.Response, 200, new
+                {
+                    currentScene = scenes.CurrentScene,
+                    scenes = scenes.AvailableScenes,
+                    connectedPeers = scenes.ConnectedPeers,
+                    expectedPeers = scenes.ExpectedPeers,
+                    localHost = snapshot.LocalHost,
+                    controller = snapshot.Controller,
+                    isController = snapshot.IsController,
+                    hosts = snapshot.Hosts,
+                    deskConnected = snapshot.ConnectedHosts,
+                    monitors = snapshot.Monitors.Select(m => new
+                    {
+                        m.Id,
+                        m.Label,
+                        m.DeskX,
+                        m.DeskY,
+                        m.Width,
+                        m.Height,
+                        m.ActiveHost,
+                        m.Switchable,
+                        sources = m.Sources.Select(s => new { s.Host, s.Input, s.Reachable, s.AvailableInputs }),
+                    }),
+                    crossings = snapshot.Crossings,
+                }, cancellationToken);
+                return;
+            }
+
+            // The same answer as plain text, staged in the order the stages depend on each other.
+            // Written here rather than in a script because both computers must report it identically
+            // and neither can be assumed to have anything installed to read JSON with.
+            if (request.HttpMethod == "GET" && request.Url?.AbsolutePath == "/api/status.txt")
+            {
+                await WriteAsync(context.Response, 200, "text/plain; charset=utf-8", Summarise(), cancellationToken);
                 return;
             }
 
@@ -78,6 +119,45 @@ public sealed class SceneControlServer(ISceneCoordinator scenes, int port, ILogg
             if (context.Response.OutputStream.CanWrite)
                 await WriteJsonAsync(context.Response, 500, new { message = ex.Message }, CancellationToken.None);
         }
+    }
+
+    private string Summarise()
+    {
+        var s = desk.Snapshot;
+        var text = new StringBuilder();
+        void Line(bool good, string what) => text.AppendLine($"  {(good ? "ok  " : "FAIL")}  {what}");
+
+        text.AppendLine($"computer: {s.LocalHost}   controller: {s.Controller}   role: {(s.IsController ? "has the keyboard" : "follows")}");
+
+        text.AppendLine("1. display management");
+        Line(s.Monitors.Count > 0, $"{s.Monitors.Count} monitor(s) on the desk");
+        foreach (var m in s.Monitors)
+            text.AppendLine($"        {m.Label}  {m.Width}x{m.Height}  at {m.DeskX},{m.DeskY}  on={m.ActiveHost ?? "nobody"}");
+
+        text.AppendLine("2. connection");
+        var others = s.Hosts.Where(h => !h.Equals(s.LocalHost, StringComparison.OrdinalIgnoreCase)).ToList();
+        Line(others.Count == 0 || s.ConnectedHosts.Count > 0,
+            others.Count == 0 ? "no other computer configured" : $"connected: {string.Join(", ", s.ConnectedHosts.DefaultIfEmpty("(none)"))} of {string.Join(", ", others)}");
+
+        text.AppendLine("3. cursor");
+        var crossings = s.Crossings ?? [];
+        Line(crossings.Count > 0, crossings.Count > 0 ? $"{crossings.Count} crossing(s)" : "no crossings — the pointer cannot leave this computer");
+        foreach (var c in crossings) text.AppendLine($"        {c}");
+
+        text.AppendLine("4. arrangement");
+        text.AppendLine($"        layout: {string.Join("; ", s.Monitors.Select(m => $"{m.Id}@{m.DeskX},{m.DeskY}"))}");
+        text.AppendLine($"        crossings: {string.Join("; ", crossings)}");
+
+        text.AppendLine("5. switching");
+        var shared = s.Monitors.Where(m => m.Sources.Count > 1).ToList();
+        if (shared.Count == 0) text.AppendLine("        no monitor is wired to more than one computer yet");
+        foreach (var m in shared)
+        {
+            var known = m.Sources.Count(x => x.Input != null);
+            Line(known == m.Sources.Count,
+                $"{m.Label}: {string.Join(", ", m.Sources.Select(x => $"{x.Host}={x.Input?.ToString() ?? "unknown"}"))}");
+        }
+        return text.ToString();
     }
 
     private static Task WriteJsonAsync(HttpListenerResponse response, int status, object body, CancellationToken cancellationToken) =>

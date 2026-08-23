@@ -273,13 +273,44 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             // startup: a setup saved a moment ago has to appear straight away, not after a restart.
             Scenes: _config.Profiles.Where(p => !string.IsNullOrWhiteSpace(p.ProfileName)).Select(p => p.ProfileName!).ToList(),
             CurrentScene: _scenes.CurrentScene,
-            IsController: IsController);
+            IsController: IsController,
+            Crossings: Crossings());
+    }
+
+    // Where the pointer can move between computers, mirror-expanded so both halves of each crossing
+    // are listed. An empty list here means the desk cannot be left, however right it looks.
+    private List<string> Crossings()
+    {
+        var profile = _config.Profiles.FirstOrDefault(p =>
+            string.Equals(p.ProfileName, _scenes.CurrentScene, StringComparison.OrdinalIgnoreCase))
+            ?? _config.Profiles.FirstOrDefault();
+        if (profile == null) return [];
+
+        var hosts = profile.Hosts.Select(h => new HostConfig
+        {
+            Name = h.Name,
+            Neighbours = h.Neighbours.Select(n => new NeighbourConfig
+            {
+                Direction = n.Direction, Name = n.Name, Mirror = n.Mirror,
+                SourceScreen = n.SourceScreen, DestScreen = n.DestScreen,
+                SourceStart = n.SourceStart, SourceEnd = n.SourceEnd,
+                DestStart = n.DestStart, DestEnd = n.DestEnd,
+            }).ToList(),
+        }).ToList();
+        HydraConfig.ExpandMirrors(hosts);
+
+        return hosts
+            .SelectMany(h => h.Neighbours.Select(n => $"{h.Name} {n.Direction} {n.Name}"))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private void Broadcast()
     {
         if (!IsController || _peers.Length == 0) return;
         var message = new DeskStateMessage(
+            DeskConfigStore.Fingerprint(_config),
             _snapshot.Controller,
             _snapshot.Hosts.ToList(),
             _snapshot.ConnectedHosts.ToList(),
@@ -288,6 +319,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
                 m.Sources.Select(s => new DeskStateSource(s.Host, s.Input, s.Reachable)).ToList())).ToList(),
             _snapshot.Scenes.ToList(),
             _snapshot.CurrentScene);
+        _log.LogDebug("Desk state -> {Peers}: {Monitors} monitor(s)", string.Join(",", _peers), message.Monitors.Count);
         Send(_peers, MessageSerializer.Encode(MessageKind.DeskState, message));
     }
 
@@ -586,10 +618,22 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         {
             var placed = DeskArrangement.Place(file.Monitors, id =>
                 profile.DisplayRouting.HostFor(id)
-                ?? _snapshot.Monitors.FirstOrDefault(m => m.Id == id)?.ActiveHost);
+                ?? _snapshot.Monitors.FirstOrDefault(m => m.Id == id)?.ActiveHost
+                // A computer that is momentarily away still owns its monitors. Without this, a peer
+                // restarting erases every crossing to it — and that emptied layout is then written
+                // and pushed, so the desk destroys itself the moment the other machine blinks.
+                ?? OnlyOwnerOf(file, id));
             return Clone(profile, DeskArrangement.BuildHosts(placed, allHosts));
         }).ToList();
         return WithProfiles(file, profiles);
+    }
+
+    // The computer a monitor belongs to when only one is wired to it. Not a guess: a monitor with a
+    // single source has nowhere else it could be showing.
+    private static string? OnlyOwnerOf(HydraConfigFile file, string monitorId)
+    {
+        var monitor = file.Monitors.FirstOrDefault(m => m.Id == monitorId);
+        return monitor?.Sources.Count == 1 ? monitor.Sources[0].Host : null;
     }
 
     // Compares only what the pointer cares about: who is next to whom, in which direction.
@@ -706,8 +750,12 @@ public sealed class DeskService : SimpleHostedService, IDeskService
     private async Task OnMessageReceived(string sourceHost, MessageKind kind, ReadOnlyMemory<byte> body)
     {
         if (kind is MessageKind.DeskInventory or MessageKind.DeskState or MessageKind.DeskCommand
-            or MessageKind.DeskConfigPush or MessageKind.DeskSetInput or MessageKind.DeskSetInputResult)
+            or MessageKind.DeskConfigPush or MessageKind.DeskSetInput or MessageKind.DeskSetInputResult
+            or MessageKind.DeskDisplayPower)
+        {
             _replied.Add(sourceHost);
+            _log.LogDebug("Desk message {Kind} from {Host} (controller={IsController})", kind, sourceHost, IsController);
+        }
 
         switch (kind)
         {
@@ -724,6 +772,10 @@ public sealed class DeskService : SimpleHostedService, IDeskService
                     new DeskSetInputResultMessage(request.RequestId, result.Success, result.Detail)));
                 break;
             }
+
+            case MessageKind.DeskConfigRequest when IsController:
+                Greet([sourceHost]);
+                break;
 
             case MessageKind.DeskDisplayPower:
             {
@@ -750,7 +802,19 @@ public sealed class DeskService : SimpleHostedService, IDeskService
                     state.Monitors.Select(m => new DeskMonitorView(
                         m.Id, m.Label, m.DeskX, m.DeskY, m.Width, m.Height, m.ActiveHost,
                         m.Sources.Select(s => new DeskSourceView(s.Host, s.Input, s.Reachable)).ToList())).ToList(),
-                    state.Scenes, state.CurrentScene, IsController: false);
+                    state.Scenes, state.CurrentScene, IsController: false, Crossings: Crossings());
+
+                // The desk we are shown and the desk we hold are different things: the picture
+                // arrives every few seconds, the document only when the controller decides to send
+                // it. A computer that restarted, or that missed the one push it was ever sent, would
+                // otherwise keep a stale desk for good — which is exactly how a follower ended up
+                // with every monitor and no crossings, unable to send the pointer back.
+                if (state.Fingerprint != null && state.Fingerprint != DeskConfigStore.Fingerprint(_config))
+                {
+                    _log.LogDebug("Desk document differs from {Host}; asking for it", sourceHost);
+                    Send([sourceHost], MessageSerializer.Encode(MessageKind.DeskConfigRequest, new DeskConfigRequestMessage()));
+                }
+
                 Changed?.Invoke();
                 break;
             }
@@ -812,7 +876,11 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             var incoming = DeskConfigStore.Parse(push.Json, _store.Path);
             var local = _store.Load();
             var merged = DeskConfigStore.Merge(local, incoming);
-            if (DeskConfigStore.SameDesk(local, merged)) return;
+            // Compared on everything the desk shares, crossings included. An earlier check looked at
+            // the monitors alone, so a document that differed only in where the pointer may cross
+            // was judged identical and never written — leaving a follower with every monitor, no
+            // crossings, and no way to notice.
+            if (DeskConfigStore.Fingerprint(local) == DeskConfigStore.Fingerprint(merged)) return;
             // A restart would read this file back, so it has to be on disk first either way.
             await _store.SaveAsync(merged);
             _config = merged;

@@ -29,10 +29,13 @@ public record DeskSnapshot(
     IReadOnlyList<DeskMonitorView> Monitors,
     IReadOnlyList<string> Scenes,
     string? CurrentScene,
-    bool IsController)
+    bool IsController,
+    // Where the pointer can leave one computer for another, as "NINOG Left Mac". Reported because
+    // an empty list here is the difference between a desk that works and one that only looks right.
+    IReadOnlyList<string>? Crossings = null)
 {
     public static DeskSnapshot Empty(string localHost) =>
-        new(localHost, localHost, [localHost], [], [], [], null, true);
+        new(localHost, localHost, [localHost], [], [], [], null, true, []);
 }
 
 public record DeskActionResult(bool Accepted, string Message)
