@@ -56,19 +56,18 @@ public static class DeskArrangement
         // Position decides this, not contact. Two monitors with a gap between them are still one to
         // the left of the other, exactly as they sit on the desk, and the pointer should cross
         // between them; requiring them to touch made a perfectly sensible arrangement do nothing.
-        // The monitor facing most squarely wins, and the nearer one breaks a tie.
-        var best = new Dictionary<(string FromScreen, string To, Direction Dir), (string From, Edge Edge)>();
+        //
+        // One edge per pair of screens per direction, not one per pair of computers. A computer can
+        // have two monitors stacked to the right of one of yours, and each takes the part of your
+        // right edge it actually faces; keeping only the "best" of them silently deleted the other,
+        // so half the edge led nowhere.
+        var candidates = new Dictionary<(string From, string To, Direction Dir), (string Host, string ToHost, Direction Dir, Edge Edge)>();
 
         void Note(Placed a, Placed b, Direction dir, Edge edge)
         {
-            // Keyed by the source screen, so one computer can reach another from more than one of
-            // its own monitors, in a different direction from each.
-            var key = (a.Host + " " + (a.ScreenId ?? a.MonitorId), b.Host, dir);
-            if (best.TryGetValue(key, out var current)
-                && (current.Edge.Facing > edge.Facing
-                    || (current.Edge.Facing == edge.Facing && current.Edge.Gap <= edge.Gap)))
-                return;
-            best[key] = (a.Host, edge);
+            var key = (a.Host + " " + (a.ScreenId ?? a.MonitorId), b.Host + " " + (b.ScreenId ?? b.MonitorId), dir);
+            if (candidates.TryGetValue(key, out var current) && current.Edge.Gap <= edge.Gap) return;
+            candidates[key] = (a.Host, b.Host, dir, edge);
         }
 
         foreach (var a in placed)
@@ -83,26 +82,29 @@ public static class DeskArrangement
                 // Side by side: they face each other across whatever vertical span they share.
                 if (bottom > top)
                 {
-                    if (b.X >= a.Right)
+                    if (b.X >= a.Right && !Blocked(placed, a, b, Direction.Right, top, bottom))
                         Note(a, b, Direction.Right, Span(a, b, top, bottom, bottom - top, b.X - a.Right, vertical: true));
-                    else if (b.Right <= a.X)
+                    else if (b.Right <= a.X && !Blocked(placed, a, b, Direction.Left, top, bottom))
                         Note(a, b, Direction.Left, Span(a, b, top, bottom, bottom - top, a.X - b.Right, vertical: true));
                 }
 
                 // Stacked: the same idea turned ninety degrees.
                 if (right > left)
                 {
-                    if (b.Y >= a.Bottom)
+                    if (b.Y >= a.Bottom && !Blocked(placed, a, b, Direction.Down, left, right))
                         Note(a, b, Direction.Down, Span(a, b, left, right, right - left, b.Y - a.Bottom, vertical: false));
-                    else if (b.Bottom <= a.Y)
+                    else if (b.Bottom <= a.Y && !Blocked(placed, a, b, Direction.Up, left, right))
                         Note(a, b, Direction.Up, Span(a, b, left, right, right - left, a.Y - b.Bottom, vertical: false));
                 }
             }
         }
 
-        foreach (var ((_, to, dir), (from, edge)) in best)
+        // Nearest first. Where two edges still overlap on the same stretch of the same edge, the
+        // router takes the first one that covers the pointer, and the monitor you can reach without
+        // passing another one is the one you meant.
+        foreach (var (host, to, dir, edge) in candidates.Values.OrderBy(c => c.Edge.Gap).ThenByDescending(c => c.Edge.Facing))
         {
-            hosts[from].Neighbours.Add(new NeighbourConfig
+            hosts[host].Neighbours.Add(new NeighbourConfig
             {
                 Direction = dir,
                 Name = to,
@@ -119,6 +121,38 @@ public static class DeskArrangement
         }
 
         return hosts.Values.ToList();
+    }
+
+    // A monitor you cannot see past is not your neighbour.
+    //
+    // Three monitors in a row, the far one on another computer: without this the near pair and the
+    // far pair both become crossings, so the pointer leaving the first monitor jumped straight to
+    // the third and skipped the one physically between them. Only a monitor that covers the whole
+    // span the two share blocks them — one that covers part of it still leaves the rest facing, and
+    // the nearer edge is matched first.
+    private static bool Blocked(
+        IReadOnlyList<Placed> placed, Placed a, Placed b, Direction dir, int start, int end)
+    {
+        foreach (var c in placed)
+        {
+            if (ReferenceEquals(c, a) || ReferenceEquals(c, b)) continue;
+
+            var between = dir switch
+            {
+                Direction.Right => c.Right > a.Right && c.X < b.X,
+                Direction.Left => c.X < a.X && c.Right > b.Right,
+                Direction.Down => c.Bottom > a.Bottom && c.Y < b.Y,
+                Direction.Up => c.Y < a.Y && c.Bottom > b.Bottom,
+                _ => false,
+            };
+            if (!between) continue;
+
+            var covers = dir is Direction.Left or Direction.Right
+                ? c.Y <= start && c.Bottom >= end
+                : c.X <= start && c.Right >= end;
+            if (covers) return true;
+        }
+        return false;
     }
 
     private static (int Start, int End) Overlap(int aStart, int aEnd, int bStart, int bEnd) =>

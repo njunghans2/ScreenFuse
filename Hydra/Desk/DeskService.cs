@@ -95,20 +95,59 @@ public sealed class DeskService : SimpleHostedService, IDeskService
     // the loop interval — the two-computer handshake is where the mistakes have actually been.
     internal Task PumpAsync(CancellationToken cancel = default) => Execute(cancel);
 
-    protected override async Task Execute(CancellationToken cancel)
+    protected override async Task Execute(CancellationToken cancelToken)
     {
-        await RefreshPeersAsync();
-        var inventory = await BuildInventoryAsync(cancel);
-        if (IsController)
+        var cancel = cancelToken;
+        // Said out loud, once. A round that never finishes leaves the desk on whatever it last had
+        // -- which at startup is nothing at all -- and the only visible symptom is a desk reporting
+        // no monitors, which reads as "not set up yet" rather than "this is failing every round".
+        // A round that never returns wedges the desk forever, and silently: the loop never ticks
+        // again, the snapshot stays on whatever it last had -- at startup, nothing -- and the desk
+        // reports no monitors, which reads as "not set up yet" rather than "stuck".
+        using var round = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        round.CancelAfter(TimeSpan.FromSeconds(30));
+        cancel = round.Token;
+
+        try
         {
-            _reports[LocalName] = inventory;
-            await RecomputeAsync(cancel);
+            _log.LogDebug("Desk round: refreshing peers");
+            await RefreshPeersAsync();
+            _log.LogDebug("Desk round: reading monitors");
+            var inventory = await BuildInventoryAsync(cancel);
+            _log.LogDebug("Desk round: {Count} monitor(s) readable here", inventory.Monitors?.Count ?? 0);
+            if (IsController)
+            {
+                _reports[LocalName] = inventory;
+                await RecomputeAsync(cancel);
+                if (!_roundCompleted)
+                {
+                    _roundCompleted = true;
+                    _log.LogInformation(
+                        "Desk ready: {Stored} monitor(s) on file, {Reported} readable here, {Shown} on the desk",
+                        _config.Monitors.Count, inventory.Monitors?.Count ?? 0, _snapshot.Monitors.Count);
+                }
+            }
+            else
+            {
+                await SendToControllerAsync(MessageSerializer.Encode(MessageKind.DeskInventory, inventory), cancel);
+            }
         }
-        else
+        catch (OperationCanceledException) when (round.IsCancellationRequested && !cancelToken.IsCancellationRequested)
         {
-            await SendToControllerAsync(MessageSerializer.Encode(MessageKind.DeskInventory, inventory));
+            if (_roundFailures++ % 10 == 0)
+                _log.LogError("The desk gave up on a round after 30 seconds. Something it depends on is not "
+                    + "answering; it will keep the monitors it already had and try again");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            if (_roundFailures++ % 10 == 0)
+                _log.LogError(ex, "The desk could not finish a round -- it will keep the monitors it already had");
+            throw;
         }
     }
+
+    private bool _roundCompleted;
+    private int _roundFailures;
 
     // The peer list cannot come from the PeersChanged event alone. This service is constructed after
     // the relay connection, so on a desk whose peers connect early the event has already fired by
@@ -196,7 +235,9 @@ public sealed class DeskService : SimpleHostedService, IDeskService
 
     private async Task RecomputeAsync(CancellationToken cancel, bool forcePush = false)
     {
+        _log.LogDebug("Desk recompute: waiting for the desk lock");
         await _gate.WaitAsync(cancel);
+        _log.LogDebug("Desk recompute: merging");
         try
         {
             var merge = DeskMerge.Merge(_config.Monitors, _reports, _optimistic, KnownHosts());
@@ -213,6 +254,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
                 if (merge.Views.FirstOrDefault(v => v.Id == id) is { } view && view.Sources.Any(s => s.Reachable && s.Host.Equals(host, StringComparison.OrdinalIgnoreCase)))
                     _optimistic.Remove(id);
 
+            _log.LogDebug("Desk recompute: merged into {Count} monitor(s)", merge.Views.Count);
             _snapshot = BuildSnapshot(merge.Views);
 
             // The arrangement is the source of truth for where the pointer crosses. Deriving the
@@ -238,6 +280,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
                 }
             }
 
+            _log.LogDebug("Desk recompute: broadcasting");
             Broadcast();
         }
         finally { _gate.Release(); }
@@ -399,6 +442,15 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         DeskActionResult result;
         if (target?.Input != null && !string.IsNullOrWhiteSpace(owner) && !string.IsNullOrWhiteSpace(ddcId))
         {
+            // Wake the computer we are switching *to* first, and give it a moment.
+            //
+            // A monitor asked for an input nothing is driving finds no signal and goes hunting for
+            // one, which lands it straight back on the computer it just left -- a switch that goes
+            // black and undoes itself a few seconds later. The same switch works perfectly when that
+            // computer happens to be awake, which is exactly what makes it look intermittent rather
+            // than like the missing step it is.
+            await WakeForSwitchAsync(host, cancel);
+
             result = await SwitchAsync(owner!, ddcId!, target.Input.Value, cancel);
             if (!result.Accepted) result = ExplainSwitchGap(monitor, owner, host, result.Message);
         }
@@ -408,9 +460,58 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         _optimistic[monitorId] = host;
         _snapshot = BuildSnapshot(_snapshot.Monitors
             .Select(m => m.Id == monitorId ? m with { ActiveHost = host } : m).ToList());
+
+        // The monitor now belongs to someone else, so the pointer crosses somewhere else. Derived
+        // and handed over now rather than at the next round: waiting meant the crossings stayed
+        // where the monitor used to be for several seconds, and the only way through was to keep
+        // moving the mouse until they caught up.
+        var rebuilt = RebuildHosts(_config);
+        if (!SameTopology(_config, rebuilt))
+        {
+            _config = rebuilt;
+            ApplyLayout();
+            await PersistAsync(push: true);
+        }
+
         Broadcast();
         Changed?.Invoke();
         return DeskActionResult.Ok($"{monitor.DisplayName()} switched to {host}.");
+    }
+
+    // Asks a computer to drive its displays again, so that a monitor switched to it finds a signal.
+    //
+    // Best effort on purpose: a computer that cannot be reached, or is too old to understand the
+    // request, must not stop the switch. It only ever made things worse to refuse.
+    private async Task WakeForSwitchAsync(string host, CancellationToken cancel)
+    {
+        try
+        {
+            if (host.Equals(LocalName, StringComparison.OrdinalIgnoreCase))
+            {
+                await _router.SetDisplayPowerAsync(wake: true, cancel);
+            }
+            else
+            {
+                var requestId = Guid.NewGuid().ToString("N");
+                var completion = new TaskCompletionSource<DeskSetInputResultMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _pending[requestId] = completion;
+                try
+                {
+                    Send([host], MessageSerializer.Encode(MessageKind.DeskDisplayPower, new DeskDisplayPowerMessage(requestId, Wake: true)));
+                    await completion.Task.WaitAsync(RemoteTimeout, cancel);
+                }
+                finally { _pending.TryRemove(requestId, out _); }
+            }
+
+            // Output does not come back the instant it is asked for. Switching into a signal that is
+            // still arriving is the same as switching into no signal at all.
+            var settle = _config.Profiles.FirstOrDefault()?.DisplayRouting.SettleDelayMs ?? 500;
+            if (settle > 0) await Task.Delay(settle, cancel);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _log.LogDebug(ex, "Could not wake {Host} before switching a monitor to it", host);
+        }
     }
 
     // Explains what is missing and what to do about it.
@@ -522,6 +623,13 @@ public sealed class DeskService : SimpleHostedService, IDeskService
 
             _config = WithMonitors(_config, monitors);
             _config = RebuildHosts(_config);
+            // Handed to the router here, not merely written. Rebuilding and persisting without this
+            // left the new crossings sitting in the file while the pointer went on using the old
+            // ones, so moving a monitor did nothing until the agent was restarted — and the desk on
+            // screen disagreed with the desk you could feel. Recompute cannot do it either: it
+            // applies only when the derived layout differs from the stored one, and by this point
+            // they are the same.
+            ApplyLayout();
             await PersistAsync(push: true);
         }
         finally { _gate.Release(); }
@@ -741,6 +849,12 @@ public sealed class DeskService : SimpleHostedService, IDeskService
 
     private async Task PersistAsync(bool push)
     {
+        if (_configUnreadable)
+        {
+            _log.LogWarning("Not writing the desk document: the one on disk could not be read, and "
+                + "replacing it with what this computer has would destroy it");
+            return;
+        }
         try { await _store.SaveAsync(_config); }
         catch (Exception ex)
         {
@@ -938,10 +1052,17 @@ public sealed class DeskService : SimpleHostedService, IDeskService
 
     // Before the first peer list arrives, the masters the relay already knows about are the best
     // guess at who is listening — a joining computer should not have to wait a round to be seen.
-    private async Task SendToControllerAsync(byte[] payload)
+    // Takes the round's cancellation, because it can wait indefinitely.
+    //
+    // Asking who the controller is takes a lock shared with the relay, and a follower whose
+    // controller is not there can sit on it forever. Without a token the round never returns, the
+    // four-second loop never ticks again, and the desk keeps the snapshot it started with -- an
+    // empty one. What the user sees is a desk with no monitors and no explanation, on a machine
+    // whose config is perfectly fine.
+    private async Task SendToControllerAsync(byte[] payload, CancellationToken cancel)
     {
         var targets = _peers;
-        if (targets.Length == 0) targets = await _world.GetMasters();
+        if (targets.Length == 0) targets = await _world.GetMasters().AsTask().WaitAsync(cancel);
         if (targets.Length == 0) return;
         Send(targets, payload);
     }
@@ -963,9 +1084,32 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         });
     }
 
+    // A desk document that cannot be read is not an empty desk.
+    //
+    // Swallowing the failure and carrying on with a blank document made an unreadable config look
+    // exactly like a fresh install: no monitors, no other computer, no crossings, and not one word
+    // anywhere to say why. Worse, the blank was then written back over the file that could not be
+    // read, so a config the desk merely failed to parse became a config that really was empty --
+    // taking the arrangement, the pairing and the learned monitor wiring with it.
     private HydraConfigFile SafeLoad()
     {
-        try { return _store.Load(); }
-        catch (Exception) { return new HydraConfigFile(); }
+        try
+        {
+            var loaded = _store.Load();
+            _configUnreadable = false;
+            return loaded;
+        }
+        catch (Exception ex)
+        {
+            _configUnreadable = true;
+            _log.LogError(ex, "Could not read the desk document at {Path} -- starting with an empty desk "
+                + "and refusing to write over it. Nothing will be lost, but nothing will work either "
+                + "until this is fixed", _store.Path);
+            return new HydraConfigFile();
+        }
     }
+
+    // Set while the document on disk could not be read. Everything else carries on; only writing is
+    // held back, because the one thing worse than an unreadable desk is overwriting it.
+    private bool _configUnreadable;
 }

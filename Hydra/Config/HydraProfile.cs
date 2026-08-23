@@ -35,13 +35,18 @@ public interface IHydraProfile
     HostConfig? LocalHost { get; }
     IEnumerable<HostConfig> RemoteHosts { get; }
 
-    // Adopts a new arrangement without restarting.
+    // Adopts a new arrangement without restarting, and says so.
     //
-    // The input router rebuilds its layout from Hosts whenever the screens change, so replacing
-    // them here is enough for a rearranged desk to take effect within seconds. Before this, the
-    // crossings were written to the config and read back only at startup: the desk said the pointer
-    // could cross and the router — still holding the layout it was built with — disagreed.
+    // Replacing the list is not enough on its own. The input router builds a layout from Hosts and
+    // then keeps it, rebuilding only when the screens change or a peer comes and goes — and dragging
+    // a monitor around the desk changes no screen at all, so the rebuild never came. The desk said
+    // the pointer could cross and the router, still holding the layout it started with, disagreed;
+    // the arrangement appeared to take effect only after a restart, or after a peer reconnected and
+    // rebuilt it by accident.
     void ApplyHosts(List<HostConfig> hosts);
+
+    // Raised after ApplyHosts, so whoever is holding a layout derived from Hosts can rebuild it.
+    event Action? HostsChanged;
 }
 
 public class HydraProfile(HydraConfigFile configFile, HydraConfig? activeProfile, string? networkConfigOverride = null) : IHydraProfile
@@ -62,7 +67,13 @@ public class HydraProfile(HydraConfigFile configFile, HydraConfig? activeProfile
 
     public List<HostConfig> Hosts => _hosts ?? _activeProfile?.Hosts ?? [];
 
-    public void ApplyHosts(List<HostConfig> hosts) => _hosts = hosts;
+    public event Action? HostsChanged;
+
+    public void ApplyHosts(List<HostConfig> hosts)
+    {
+        _hosts = hosts;
+        HostsChanged?.Invoke();
+    }
     public List<ScreenDefinition> ScreenDefinitions => _activeProfile?.ScreenDefinitions ?? [];
     public decimal? MouseScale => _activeProfile?.MouseScale;
     public decimal? RelativeMouseScale => _activeProfile?.RelativeMouseScale;

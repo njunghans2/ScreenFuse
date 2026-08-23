@@ -50,14 +50,26 @@ internal static partial class AgentCommands
             Codesign(shieldPath, ShieldLabel);
         }
 
-        // remove any running instance before overwriting the plist
-        RunLaunchctl($"bootout {DomainTarget()}/{Label}", tolerateFailure: true);
-
         File.WriteAllText(plistPath, GeneratePlist(exePath, workingDir, logDir), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
-        RunLaunchctl($"bootstrap {DomainTarget()} \"{plistPath}\"");
+        foreach (var command in BootstrapSequence(DomainTarget(), Label, plistPath))
+            RunLaunchctl(command, tolerateFailure: !command.StartsWith("bootstrap", StringComparison.Ordinal));
         Console.WriteLine("ScreenFuse agent installed and started.");
     }
+
+    // The order launchd needs, in one place, because getting it wrong fails obscurely.
+    //
+    // "enable" is the step that is easy to leave out and impossible to guess from the error. Being
+    // disabled is recorded in launchd's own database, not in the plist, and it outlives deleting the
+    // file — so an uninstall that disables the job (which it must, or logging in brings it back)
+    // leaves the next install failing with "Bootstrap failed: 5: Input/output error" and nothing
+    // whatsoever to say the job was simply switched off.
+    internal static IReadOnlyList<string> BootstrapSequence(string domain, string label, string plistPath) =>
+    [
+        $"bootout {domain}/{label}",
+        $"enable {domain}/{label}",
+        $"bootstrap {domain} \"{plistPath}\"",
+    ];
 
     // Quitting has to tell launchd, not just exit.
     //
@@ -100,20 +112,59 @@ internal static partial class AgentCommands
         Console.WriteLine("Updated the ScreenFuse launch agent so a deliberate quit is no longer undone.");
     }
 
-    internal static void Uninstall()
+    // Removes everything the installer put there, whatever state it is already in.
+    //
+    // The old version gave up the moment the plist was missing and reported "not installed" — which
+    // is precisely the case that needs the most help: a job still loaded in launchd, still
+    // relaunching itself, with the file that described it already deleted. Every step is now
+    // attempted regardless, and the job is disabled as well as booted out so that logging in again
+    // does not bring it back.
+    internal static void Uninstall(bool purgeSettings = false)
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var plistPath = Path.Combine(home, "Library", "LaunchAgents", PlistFileName);
 
-        if (!File.Exists(plistPath))
+        RunLaunchctl($"bootout {DomainTarget()}/{Label}", tolerateFailure: true);
+        RunLaunchctl($"disable {DomainTarget()}/{Label}", tolerateFailure: true);
+
+        if (File.Exists(plistPath))
         {
-            Console.WriteLine("ScreenFuse agent is not installed.");
-            return;
+            try { File.Delete(plistPath); }
+            catch (Exception ex) { Console.Error.WriteLine($"Could not remove {plistPath}: {ex.Message}"); }
         }
 
-        RunLaunchctl($"bootout {DomainTarget()}/{Label}", tolerateFailure: true);
-        File.Delete(plistPath);
-        Console.WriteLine("ScreenFuse agent removed.");
+        RemoveAppBundle();
+
+        if (purgeSettings)
+        {
+            var settings = Path.Combine(home, "Library", "Application Support", "ScreenFuse");
+            if (Directory.Exists(settings))
+            {
+                try { Directory.Delete(settings, recursive: true); Console.WriteLine($"Removed settings in {settings}."); }
+                catch (Exception ex) { Console.Error.WriteLine($"Could not remove {settings}: {ex.Message}"); }
+            }
+        }
+
+        Console.WriteLine("ScreenFuse removed. Nothing is left that can start it again.");
+    }
+
+    // The installed bundle, not whichever copy is running. Deleting the copy the user double-clicked
+    // from their downloads would leave the installed one behind, which is the wrong way round.
+    private static void RemoveAppBundle()
+    {
+        const string installed = "/Applications/ScreenFuse.app";
+        if (!Directory.Exists(installed)) return;
+
+        var running = Environment.ProcessPath;
+        if (running != null && running.StartsWith(installed, StringComparison.OrdinalIgnoreCase))
+        {
+            // Unlinking a running bundle is allowed on macOS: the process keeps its open handles and
+            // the files go as soon as it exits, so there is nothing to schedule and nothing left over.
+            Console.WriteLine($"Removing {installed} — ScreenFuse will finish exiting on its own.");
+        }
+
+        try { Directory.Delete(installed, recursive: true); Console.WriteLine($"Removed {installed}."); }
+        catch (Exception ex) { Console.Error.WriteLine($"Could not remove {installed}: {ex.Message}"); }
     }
 
     internal static void Codesign(string path, string identifier, bool deep = false)

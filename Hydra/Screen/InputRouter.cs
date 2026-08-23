@@ -101,6 +101,7 @@ public class InputRouter(
         relay.MessageReceived += OnMessageReceived;
         relay.Disconnected += OnRelayDisconnected;
         screens.ScreensChanged += OnScreensChanged;
+        profile.HostsChanged += OnHostsChanged;
 
         _pollCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
@@ -126,6 +127,7 @@ public class InputRouter(
         relay.MessageReceived -= OnMessageReceived;
         relay.Disconnected -= OnRelayDisconnected;
         screens.ScreensChanged -= OnScreensChanged;
+        profile.HostsChanged -= OnHostsChanged;
 
         _screenSaverSync.ScreensaverActivated -= OnScreensaverActivated;
         _screenSaverSync.ScreensaverDeactivated -= OnScreensaverDeactivated;
@@ -203,6 +205,30 @@ public class InputRouter(
         if (!_commands.Writer.TryWrite(_ => { tcs.TrySetResult(); return ValueTask.CompletedTask; }))
             return Task.CompletedTask;
         return tcs.Task;
+    }
+
+    // The desk was rearranged. The crossings live in Hosts and the layout is derived from them, so
+    // it has to be derived again — the pointer uses the layout, not the config, and nothing else
+    // here would ever ask for it. Dragging a monitor changes no screen and moves no peer, which is
+    // exactly why the two rebuild triggers below could not cover this.
+    private void OnHostsChanged() => _ = RebuildForNewCrossingsAsync();
+
+    private async Task RebuildForNewCrossingsAsync()
+    {
+        try
+        {
+            var peerScreens = await _peerState.GetPeerScreensSnapshot();
+            await RunFence(st =>
+            {
+                RebuildLayout(st, peerScreens);
+                return ValueTask.CompletedTask;
+            });
+            log.LogInformation("Desk crossings changed — pointer layout rebuilt");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogError(ex, "Failed to rebuild the pointer layout after the desk changed");
+        }
     }
 
     private async Task OnScreensChanged(LocalScreenSnapshot snapshot)
@@ -605,6 +631,26 @@ public class InputRouter(
         var validNames = new HashSet<string>(st.Screens.Select(s => s.Name), StringComparer.OrdinalIgnoreCase);
         foreach (var key in st.RelativeMouseScreens.Keys.Where(k => !validNames.Contains(k)).ToList())
             st.RelativeMouseScreens.Remove(key);
+
+        // The pointer is out on another computer's screen and the layout it relied on to get back has
+        // just been replaced. If the screen is gone, or the new layout gives it no edges, it is
+        // stranded — and this computer hid its cursor when the pointer left, so it is invisible as
+        // well as unreachable, with no input that can recover it. Bring it home instead.
+        if (st.Mouse.IsOnVirtualScreen && st.Mouse.CurrentScreen != null)
+        {
+            var landing = st.Screens.FirstOrDefault(s => s.Name.EqualsIgnoreCase(st.Mouse.CurrentScreen.Name));
+            if (landing == null || !newLayout.HasAnyExit(landing))
+            {
+                var left = LeaveVirtualScreen(st, out var homeX, out var homeY);
+                if (left != null)
+                {
+                    log.LogWarning(
+                        "The pointer was on {Host} with no way back after the desk changed — brought it home", left);
+                    ReturnToLocalScreen(homeX, homeY);
+                    ShowCursorOnReturn();
+                }
+            }
+        }
 
         // if the cursor is on a remote screen whose dims changed, update it
         if (st.Mouse.IsOnVirtualScreen && st.Mouse.CurrentScreen != null)
