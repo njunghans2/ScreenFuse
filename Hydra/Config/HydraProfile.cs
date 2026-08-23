@@ -34,6 +34,14 @@ public interface IHydraProfile
     // computed from Name + Hosts
     HostConfig? LocalHost { get; }
     IEnumerable<HostConfig> RemoteHosts { get; }
+
+    // Adopts a new arrangement without restarting.
+    //
+    // The input router rebuilds its layout from Hosts whenever the screens change, so replacing
+    // them here is enough for a rearranged desk to take effect within seconds. Before this, the
+    // crossings were written to the config and read back only at startup: the desk said the pointer
+    // could cross and the router — still holding the layout it was built with — disagreed.
+    void ApplyHosts(List<HostConfig> hosts);
 }
 
 public class HydraProfile(HydraConfigFile configFile, HydraConfig? activeProfile, string? networkConfigOverride = null) : IHydraProfile
@@ -50,7 +58,11 @@ public class HydraProfile(HydraConfigFile configFile, HydraConfig? activeProfile
     public Mode Mode => _activeProfile?.ResolveMode(Name) ?? Mode.Slave;
     public string? Controller => _activeProfile?.Controller;
     public List<DeskMonitorConfig> Monitors { get; } = configFile.Monitors;
-    public List<HostConfig> Hosts => _activeProfile?.Hosts ?? [];
+    private volatile List<HostConfig>? _hosts;
+
+    public List<HostConfig> Hosts => _hosts ?? _activeProfile?.Hosts ?? [];
+
+    public void ApplyHosts(List<HostConfig> hosts) => _hosts = hosts;
     public List<ScreenDefinition> ScreenDefinitions => _activeProfile?.ScreenDefinitions ?? [];
     public decimal? MouseScale => _activeProfile?.MouseScale;
     public decimal? RelativeMouseScale => _activeProfile?.RelativeMouseScale;

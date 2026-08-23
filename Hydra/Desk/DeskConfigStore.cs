@@ -114,12 +114,10 @@ public sealed class DeskConfigStore(string configPath)
             }).ToList();
             HydraConfig.ExpandMirrors(hosts);
 
-            var edges = hosts
-                .SelectMany(h => h.Neighbours.Select(n =>
-                    $"{h.Name}>{n.Direction}>{n.Name}>{n.SourceScreen}>{n.DestScreen}".ToLowerInvariant()))
-                .Distinct()
-                .OrderBy(s => s, StringComparer.Ordinal);
-            return $"{p.ProfileName}/{p.Controller}/{string.Join(',', edges)}";
+            // Crossings are deliberately absent. They are applied live now, so a rearranged desk
+            // needs no restart; only a change of who holds the keyboard does.
+            _ = hosts;
+            return $"{p.ProfileName}/{p.Controller}";
         }));
 
     private static string Describe(HydraConfigFile file) => string.Join('|',

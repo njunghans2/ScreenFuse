@@ -231,9 +231,10 @@ public sealed class DeskService : SimpleHostedService, IDeskService
                 var rebuilt = RebuildHosts(_config);
                 if (!SameTopology(_config, rebuilt))
                 {
-                    _log.LogInformation("Desk crossings changed; the new computer layout applies at the next restart");
+                    _log.LogInformation("Desk crossings changed; applying the new computer layout");
                     _config = rebuilt;
                     await PersistAsync(push: true);
+                    ApplyLayout();
                 }
             }
 
@@ -628,6 +629,30 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         return WithProfiles(file, profiles);
     }
 
+    // Hands the current arrangement to the input router, mirror-expanded so both ways round exist.
+    private void ApplyLayout()
+    {
+        var profile = _config.Profiles.FirstOrDefault(p =>
+            string.Equals(p.ProfileName, _scenes.CurrentScene, StringComparison.OrdinalIgnoreCase))
+            ?? _config.Profiles.FirstOrDefault();
+        if (profile == null) return;
+
+        var hosts = profile.Hosts.Select(h => new HostConfig
+        {
+            Name = h.Name,
+            DeadCorners = h.DeadCorners,
+            Neighbours = h.Neighbours.Select(n => new NeighbourConfig
+            {
+                Direction = n.Direction, Name = n.Name, Mirror = n.Mirror,
+                SourceScreen = n.SourceScreen, DestScreen = n.DestScreen,
+                SourceStart = n.SourceStart, SourceEnd = n.SourceEnd,
+                DestStart = n.DestStart, DestEnd = n.DestEnd,
+            }).ToList(),
+        }).ToList();
+        HydraConfig.ExpandMirrors(hosts);
+        _profile.ApplyHosts(hosts);
+    }
+
     // The computer a monitor belongs to when only one is wired to it. Not a guess: a monitor with a
     // single source has nowhere else it could be showing.
     private static string? OnlyOwnerOf(HydraConfigFile file, string monitorId)
@@ -885,13 +910,18 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             await _store.SaveAsync(merged);
             _config = merged;
 
+            // A rearranged desk is adopted where it stands. Restarting to pick up new crossings
+            // dropped the relay for several seconds every time the arrangement was nudged, which is
+            // no way to treat someone dragging a monitor around a settings window.
+            ApplyLayout();
+
             if (DeskConfigStore.SameRuntime(local, merged))
             {
                 _log.LogDebug("Desk updated by {Host}", sourceHost);
                 Changed?.Invoke();
                 return;
             }
-            _log.LogInformation("Desk layout or control changed by {Host}; restarting to apply it", sourceHost);
+            _log.LogInformation("Who holds the keyboard changed ({Host}); restarting into the new role", sourceHost);
             ScheduleRestart();
         }
         catch (Exception ex) { _log.LogWarning(ex, "Ignoring an unusable desk document from {Host}", sourceHost); }

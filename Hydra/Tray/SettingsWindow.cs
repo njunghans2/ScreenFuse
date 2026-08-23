@@ -413,7 +413,11 @@ internal static class NativeSettingsPersistence
     {
         var json = SerializeAndValidate(file, path);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var temp = path + ".tmp";
+        // A per-write temp name. With one shared ".tmp" two saves that overlap race for the same
+        // file, and the loser fails with "could not find screenfuse.conf.tmp" — which the desk
+        // reports as an unusable document from the other computer, blaming the sender for a
+        // collision at home.
+        var temp = $"{path}.{Environment.ProcessId}-{Guid.NewGuid():N}.tmp";
         await File.WriteAllTextAsync(temp, json + Environment.NewLine, new UTF8Encoding(false));
         if (File.Exists(path)) File.Copy(path, path + ".bak", overwrite: true);
         File.Move(temp, path, overwrite: true);
