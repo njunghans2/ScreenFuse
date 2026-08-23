@@ -632,6 +632,26 @@ public class InputRouter(
         foreach (var key in st.RelativeMouseScreens.Keys.Where(k => !validNames.Contains(k)).ToList())
             st.RelativeMouseScreens.Remove(key);
 
+        // The pointer is out on another computer's screen and the layout it relied on to get back has
+        // just been replaced. If the screen is gone, or the new layout gives it no edges, it is
+        // stranded — and this computer hid its cursor when the pointer left, so it is invisible as
+        // well as unreachable, with no input that can recover it. Bring it home instead.
+        if (st.Mouse.IsOnVirtualScreen && st.Mouse.CurrentScreen != null)
+        {
+            var landing = st.Screens.FirstOrDefault(s => s.Name.EqualsIgnoreCase(st.Mouse.CurrentScreen.Name));
+            if (landing == null || !newLayout.HasAnyExit(landing))
+            {
+                var left = LeaveVirtualScreen(st, out var homeX, out var homeY);
+                if (left != null)
+                {
+                    log.LogWarning(
+                        "The pointer was on {Host} with no way back after the desk changed — brought it home", left);
+                    ReturnToLocalScreen(homeX, homeY);
+                    ShowCursorOnReturn();
+                }
+            }
+        }
+
         // if the cursor is on a remote screen whose dims changed, update it
         if (st.Mouse.IsOnVirtualScreen && st.Mouse.CurrentScreen != null)
         {

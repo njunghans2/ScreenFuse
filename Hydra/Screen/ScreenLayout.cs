@@ -206,6 +206,15 @@ public class ScreenLayout(List<ScreenRect> screens, List<HostConfig> configs, in
         };
     }
 
+    // Whether this screen has any way off it at all.
+    //
+    // Asked after the layout is rebuilt. The pointer sitting on a remote screen depends entirely on
+    // this layout to get home, so a rebuild that leaves that screen with no edges strands it there —
+    // and on the computer it left, the cursor is hidden, so the pointer is both gone and invisible
+    // with no input that can recover it.
+    public bool HasAnyExit(ScreenRect screen) =>
+        _graph.Any(e => e.Key.Name.EqualsIgnoreCase(screen.Name) && e.Value.Count > 0);
+
     // returns the active edge ranges for all local screens, with dead corners trimmed.
     // each entry describes a pixel range along one edge of one local screen where a transition exists.
     public List<ActiveEdgeRange> GetLocalEdgeRanges()
