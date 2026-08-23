@@ -174,6 +174,10 @@ internal sealed class TrayApplication : Application
             Menu = menu,
             IsVisible = true,
         };
+        // Clicking the icon opens the settings, which is what everyone tries first. Avalonia raises
+        // Clicked for a double-click on Windows and a single click elsewhere; either way the icon is
+        // the obvious way in, and hunting through a menu for it is not.
+        _tray.Clicked += (_, _) => ShowSettings();
         TrayIcon.SetIcons(this, new TrayIcons { _tray });
         if (_setupOnly)
         {
