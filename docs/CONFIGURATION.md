@@ -98,7 +98,7 @@ Three things make this work, and they are all stored at the root of the config a
 - `deskX`/`deskY`/`width`/`height` are desk coordinates — the physical layout, independent of which computer is currently on the monitor. The desk never leaves two monitors overlapping.
 - `aliases` is every name any computer knows the panel by. This is what makes one monitor one monitor: Windows calls the example above "Generic PnP Monitor", the monitor's own MCCS capabilities string says "AORUS", and macOS says "AORUS FI27Q-X". Names are compared with punctuation and case removed, by containment, and names that identify nothing ("Generic PnP Monitor", "Display", "Monitor") never match anything.
 - `sources` records how each computer reaches the monitor: `input` is the MCCS VCP `0x60` value that selects that computer, `availableInputs` is the set the monitor said it accepts, `ddcId` is the identifier that computer's DDC helper answers to, and `screenId` is the name its screen detector reports.
-- `input` values are **learned automatically** where they can be. Fill one in by hand only for a computer that cannot read the monitor at all — typically because its DDC helper is not installed.
+- `input` values are **learned automatically**. When a switch needs an unknown code, ScreenFuse tries each unassigned code and accepts it only if the target computer newly reports the monitor; otherwise it restores the original input and retries on a later reconnect. There is no confirmation prompt or manual input-code workflow.
 
 ### Who is on a monitor
 
@@ -140,14 +140,14 @@ agent, and stops every running instance. In Activity Monitor the process is name
 
 ### Switching without DDC
 
-Not every desk can switch inputs, and it does not have to. If ScreenFuse does not know the input code for the computer you pick — or the monitor refuses the switch — it hands the monitor over by **moving the signal instead of the input**: the computer that should appear is woken, the one currently on the monitor stops its video output, and the monitor's own automatic input detection follows. No DDC helper, no input codes, nothing to configure.
+Not every desk can switch inputs, and it does not have to. ScreenFuse wakes the computer it is switching to before it changes the monitor input, preventing a monitor from falling back to the old signal while the target is waking. If the target is disconnected or an unknown cable cannot be verified automatically, ScreenFuse leaves the monitor on its current source and retries when the target display reconnects.
 
 Two things to know before relying on it:
 
-- **It is per computer, not per monitor.** Video output is a property of a machine, so every display on both computers moves together. On a desk where one computer drives several monitors, handing one over hands over all of them. ScreenFuse says so in the result message when that applies.
-- **The monitor must have automatic input detection enabled.** Most do by default; some scan only on signal loss, and a few need it turned on in their on-screen menu.
+- **The target must be online.** A powered-off or sleeping computer is not recorded as the owner of a shared monitor, so its crossings are removed immediately and windows remain on visible desktops.
+- **The monitor must report its inputs.** The automatic discovery probe only runs against the input codes exposed by DDC/CI.
 
-DDC is tried first whenever a code is known, because it is exact and affects one monitor. The signal handover is the fallback, and it is why a fresh desk works before anything has been set up.
+DDC is used for known cables because it is exact and affects one monitor. New cables are discovered opportunistically from display inventory changes, without asking a person to identify a screen.
 
 The crossing edges in `hosts` are **derived** from the arrangement plus each scene's monitor assignments — two monitors that touch on the desk become a crossing only while different computers are on them, and the shared portion of the touching edge becomes the percentage range. Editing `hosts` by hand still works, but the settings window rewrites it whenever the arrangement changes.
 

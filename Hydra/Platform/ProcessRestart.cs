@@ -40,6 +40,17 @@ internal static partial class ProcessRestart
         try { Console.Error.WriteLine($"[screenfuse] restarting: {reason ?? "unspecified"}"); }
         catch (IOException) { /* no console attached */ }
 
+        // A restart while the cursor is hidden (mid-crossing) would leave the OS cursor blank:
+        // the cursor is replaced or hidden by this process, and the new image starts believing
+        // it is visible. Put it back before the exit, or the user gets an invisible cursor until
+        // they reboot.
+        try
+        {
+            if (OperatingSystem.IsWindows()) Windows.WindowsCursorSnapshot.RestoreDefaults();
+            if (OperatingSystem.IsMacOS()) MacOs.NativeMethods.CGDisplayShowCursor(MacOs.NativeMethods.CGMainDisplayID());
+        }
+        catch (Exception) { /* best effort — the new process restores at startup too */ }
+
         var exePath = Environment.ProcessPath!;
 
         if (OperatingSystem.IsWindows())

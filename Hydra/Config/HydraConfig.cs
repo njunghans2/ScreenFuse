@@ -30,6 +30,16 @@ public class DeskMonitorConfig
     public int Height { get; init; }
     public List<MonitorSourceConfig> Sources { get; init; } = [];
 
+    // Whether the pointer may cross onto this monitor from another computer. Turned off, the
+    // monitor stays on whichever computer drives it and the pointer cannot leave or enter through
+    // it. Defaults to on.
+    public bool CrossingEnabled { get; init; } = true;
+
+    // True while this monitor is the blanked (slept) last display of a computer — the desk never
+    // removes an OS's final display, it blacks the panel out instead, and the monitor stays in
+    // this state until a switch brings another display (or itself) back.
+    public bool Sleeping { get; init; }
+
     public MonitorSourceConfig? Source(string host) => Sources.FirstOrDefault(s => s.Host.EqualsIgnoreCase(host));
 
     // Not a property: a computed property would be serialised into the config file as a field
@@ -40,7 +50,8 @@ public class DeskMonitorConfig
     // aliases — and with them its identity, so the next merge splits it in two again.
     public DeskMonitorConfig With(
         string? label = null, int? deskX = null, int? deskY = null,
-        int? width = null, int? height = null, List<MonitorSourceConfig>? sources = null) => new()
+        int? width = null, int? height = null, List<MonitorSourceConfig>? sources = null,
+        bool? crossingEnabled = null, bool? sleeping = null) => new()
     {
         Id = Id,
         Label = label ?? Label,
@@ -50,6 +61,8 @@ public class DeskMonitorConfig
         Width = width ?? Width,
         Height = height ?? Height,
         Sources = sources ?? Sources,
+        CrossingEnabled = crossingEnabled ?? CrossingEnabled,
+        Sleeping = sleeping ?? Sleeping,
     };
 }
 

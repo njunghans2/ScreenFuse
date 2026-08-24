@@ -63,6 +63,10 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial nint CFStringCreateWithCString(nint allocator, string str, uint encoding);
 
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CFUUIDCreateString(nint allocator, nint uuid);
+
     internal const uint KCFStringEncodingUtf8 = 0x08000100;
 
     // convenience wrapper: creates a CFString/NSString from a managed string (toll-free bridged)
@@ -178,6 +182,66 @@ internal static partial class NativeMethods
     [LibraryImport(CoreGraphics)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static unsafe partial int CGGetActiveDisplayList(uint maxDisplays, uint* activeDisplays, out uint displayCount);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static unsafe partial int CGGetOnlineDisplayList(uint maxDisplays, uint* onlineDisplays, out uint displayCount);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CGBeginDisplayConfiguration(out nint config);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CGCancelDisplayConfiguration(nint config);
+
+    // option: kCGConfigureForSession = 1, kCGConfigurePermanently = 2
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CGCompleteDisplayConfiguration(nint config, int option);
+
+    internal const int KCGConfigureForSession = 1;
+
+    // UUID of a display by its CGDirectDisplayID, stable across reboots and replugging (the raw
+    // ID is not). Caller's choice of matching key for remembering a display before it goes away.
+    // The symbol lives in ColorSync on current macOS (CoreGraphics used to re-export it), so it is
+    // resolved at runtime like the other private display APIs.
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate nint CreateUuidFromDisplayId(uint displayId);
+
+    private static readonly CreateUuidFromDisplayId? CreateUuid = ResolveCreateUuid();
+
+    private static CreateUuidFromDisplayId? ResolveCreateUuid()
+    {
+        foreach (var framework in new[]
+                 {
+                     "/System/Library/Frameworks/ColorSync.framework/ColorSync",
+                     "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+                 })
+        {
+            try
+            {
+                var handle = NativeLibrary.Load(framework);
+                var export = NativeLibrary.GetExport(handle, "CGDisplayCreateUUIDFromDisplayID");
+                return Marshal.GetDelegateForFunctionPointer<CreateUuidFromDisplayId>(export);
+            }
+            catch (Exception) { }
+        }
+        return null;
+    }
+
+    internal static unsafe string DisplayUuid(uint displayId)
+    {
+        if (CreateUuid == null) return $"display-{displayId}";
+        var uuidRef = CreateUuid(displayId);
+        if (uuidRef == nint.Zero) return $"display-{displayId}";
+        try
+        {
+            var cfString = CFUUIDCreateString(nint.Zero, uuidRef);
+            return cfString == nint.Zero ? $"display-{displayId}" : CfStringToManaged(cfString) ?? $"display-{displayId}";
+        }
+        finally { CFRelease(uuidRef); }
+    }
 
     [LibraryImport(CoreGraphics)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Hydra.Config;
+using Hydra.Platform.MacOs;
 using Microsoft.Extensions.Logging;
 
 namespace Hydra.Display;
@@ -91,10 +92,12 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
         {
             if (_inputCache.TryGetValue(monitor.Id, out var cached) && DateTime.UtcNow - cached.Read < InputCacheLife)
             {
+                log.LogDebug("Input cache hit {Id}: {Input}", monitor.Id, cached.Input?.ToString() ?? "null");
                 result.Add(monitor with { CurrentInput = cached.Input });
                 continue;
             }
             var input = await ReadInputAsync(monitor.Id, cancellationToken);
+            log.LogDebug("Input read {Id}: {Input}", monitor.Id, input?.ToString() ?? "null");
             _inputCache[monitor.Id] = (input, DateTime.UtcNow);
             result.Add(monitor with { CurrentInput = input });
         }
@@ -246,24 +249,93 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
         return Task.FromResult(new DisplayCommandResult("set monitor input", false, "Unsupported operating system"));
     }
 
+    public async Task<DisplayCommandResult> SetMonitorDisplayEnabledAsync(string localSourceId, bool enabled, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                var (success, detail) = WindowsDisplayTopology.SetMonitorEnabled(localSourceId, enabled);
+                log.LogInformation("{Action} {Source}: {Success} — {Detail}",
+                    enabled ? "Re-enable" : "Disable", localSourceId, success, detail);
+                return new DisplayCommandResult(enabled ? "re-enable display" : "disable display", success, detail);
+            }
+            if (OperatingSystem.IsMacOS())
+            {
+                var success = MacDisplayWake.SetDisplayConnected(localSourceId, enabled);
+                log.LogInformation("{Action} {Source} on macOS: {Success}",
+                    enabled ? "Re-enable" : "Disable", localSourceId, success);
+                return new DisplayCommandResult(enabled ? "re-enable display" : "disable display", success,
+                    success ? null : "The display could not be re-enabled (unknown display or refused).");
+            }
+            return new DisplayCommandResult(enabled ? "re-enable display" : "disable display", true);
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Could not {Action} the display for {Source}", enabled ? "re-enable" : "disable", localSourceId);
+            return new DisplayCommandResult(enabled ? "re-enable display" : "disable display", false, ex.Message);
+        }
+    }
+
+    public async Task<DisplayCommandResult> SetDisplayStandbyAsync(string localSourceId, bool standby, CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (OperatingSystem.IsWindows())
+                return WindowsDdc.SetDisplayStandby(localSourceId, standby);
+
+            // macOS has no per-monitor DDC: the panel-wide display sleep covers the last display,
+            // and waking it is exactly what the wake path already does (caffeinate -u), so a wake
+            // here is already done by the time the desk asks.
+            if (OperatingSystem.IsMacOS())
+                return standby
+                    ? await RunAsync("pmset", ["displaysleepnow"], "sleep displays", cancellationToken)
+                    : new DisplayCommandResult("wake display", true, "Handled by the wake path.");
+
+            return new DisplayCommandResult("set display standby", false, "Unsupported operating system");
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Could not {Action} the display for {Source}", standby ? "blank" : "wake", localSourceId);
+            return new DisplayCommandResult(standby ? "blank display" : "wake display", false, ex.Message);
+        }
+        finally { _gate.Release(); }
+    }
+
     public async Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default)
     {
+        // The macOS wake — reconnecting displays the window server dropped — shares no state with
+        // the DDC paths, so it must not wait behind the gate: a slow m1ddc inventory would starve
+        // it, the monitor's auto-hunt would win the race, and the switch would revert.
+        if (OperatingSystem.IsMacOS() && wake)
+            return await SetDisplayPowerCoreAsync(wake, cancellationToken);
         await _gate.WaitAsync(cancellationToken);
         try { return await SetDisplayPowerCoreAsync(wake, cancellationToken); }
         finally { _gate.Release(); }
     }
 
-    private static Task<DisplayCommandResult> SetDisplayPowerCoreAsync(bool wake, CancellationToken cancellationToken)
+    private static async Task<DisplayCommandResult> SetDisplayPowerCoreAsync(bool wake, CancellationToken cancellationToken)
     {
         if (OperatingSystem.IsWindows())
-            return Task.FromResult(WindowsDdc.SetAllDisplayPower(wake));
+            return WindowsDdc.SetAllDisplayPower(wake);
         if (OperatingSystem.IsMacOS())
-            return wake
-                ? RunAsync("caffeinate", ["-u", "-t", "1"], "wake displays", cancellationToken)
-                : RunAsync("pmset", ["displaysleepnow"], "sleep displays", cancellationToken);
+        {
+            if (!wake)
+                return await RunAsync("pmset", ["displaysleepnow"], "sleep displays", cancellationToken);
+
+            // A monitor that was put to sleep, or switched to the other computer, is gone from
+            // macOS's display arrangement — `caffeinate` cannot bring it back, only re-enabling it
+            // via CGSConfigureDisplayEnabled can. Do that first, then wake the system.
+            var reconnected = MacDisplayWake.WakeDisconnected();
+            var caffeinated = await RunAsync("caffeinate", ["-u", "-t", "1"], "wake displays", cancellationToken);
+            return reconnected > 0
+                ? new DisplayCommandResult("reconnect displays", true, $"Reconnected {reconnected} display(s) macOS had dropped.")
+                : caffeinated;
+        }
         if (OperatingSystem.IsLinux())
-            return RunAsync("xset", ["dpms", "force", wake ? "on" : "off"], wake ? "wake displays" : "sleep displays", cancellationToken);
-        return Task.FromResult(new DisplayCommandResult(wake ? "wake displays" : "sleep displays", false, "Unsupported operating system"));
+            return await RunAsync("xset", ["dpms", "force", wake ? "on" : "off"], wake ? "wake displays" : "sleep displays", cancellationToken);
+        return new DisplayCommandResult(wake ? "wake displays" : "sleep displays", false, "Unsupported operating system");
     }
 
     // Where the package managers actually put things. Bare PATH lookup is not enough: a launchd

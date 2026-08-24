@@ -82,6 +82,16 @@ public class VirtualMouseState
         _relativeScaleMap.Clear();
     }
 
+    // Snaps the virtual pointer to where the slave's pointer actually is (screen-local), clamped to
+    // the screen. Used to reconcile the master's model with reality so the crossing edges line up
+    // with what the user is looking at.
+    public void SetPosition(int x, int y)
+    {
+        if (CurrentScreen is null || CurrentScreen.Width <= 0 || CurrentScreen.Height <= 0) return;
+        X = Math.Clamp(x, 0, CurrentScreen.Width - 1);
+        Y = Math.Clamp(y, 0, CurrentScreen.Height - 1);
+    }
+
     private void ClampToNearest(double globalX, double globalY)
     {
         // find the screen with the smallest clamped distance and snap to it

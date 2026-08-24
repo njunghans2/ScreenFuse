@@ -242,7 +242,8 @@ internal sealed class TrayApplication : Application
             _services?.GetService<IDisplayRouter>(),
             _services?.GetService<Hydra.Desk.IDeskService>(),
             message,
-            RestartAfterSave);
+            RestartAfterSave,
+            _services?.GetService<Hydra.Screen.InputRouter>());
         if (message != null) _settings.SetStatus(message);
         _settings.Closed += (_, _) => _settings = null;
         _settings.Show();

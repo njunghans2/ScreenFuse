@@ -43,6 +43,14 @@ TaskScheduler.UnobservedTaskException += (_, e) =>
     e.SetObserved();
 };
 
+// A previous instance may have been killed, or restarted itself, while the cursor was hidden —
+// the OS cursor stays replaced or hidden with no owner left to restore it. Put it back now, or
+// the user comes back to a machine whose cursor is invisible but otherwise working.
+if (OperatingSystem.IsWindows())
+    Hydra.Platform.Windows.WindowsCursorSnapshot.RestoreDefaults();
+if (OperatingSystem.IsMacOS())
+    _ = Hydra.Platform.MacOs.NativeMethods.CGDisplayShowCursor(Hydra.Platform.MacOs.NativeMethods.CGMainDisplayID());
+
 if (args.Contains("--install"))
 {
     if (OperatingSystem.IsWindows()) ServiceCommands.Install();
@@ -142,20 +150,11 @@ if (args.Contains("--reset"))
 {
     var resetPath = Environment.GetEnvironmentVariable("CONFIG") ?? HydraConfigFile.DefaultPath();
     var directory = Path.GetDirectoryName(resetPath)!;
-    var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-    var removed = new List<string>();
-
-    foreach (var name in new[] { Path.GetFileName(resetPath), ".screenfuse-scene", ".screenfuse-controller" })
-    {
-        var path = Path.Combine(directory, name);
-        if (!File.Exists(path)) continue;
-        File.Move(path, Path.Combine(directory, $"{name}.{stamp}.bak"), overwrite: true);
-        removed.Add(name);
-    }
+    var removed = SettingsReset.Reset(resetPath);
 
     Console.WriteLine(removed.Count == 0
         ? $"Nothing to reset — no settings found in {directory}."
-        : $"Reset {string.Join(", ", removed)}. A copy of each was kept as <name>.{stamp}.bak in {directory}.");
+        : $"Reset {string.Join(", ", removed)}. A copy of each was kept as <name>.*.bak in {directory}.");
     Console.WriteLine("Start ScreenFuse again to set the desk up from scratch.");
     return;
 }
@@ -519,6 +518,8 @@ if (config != null)
     services.AddSingleton(configFile);
     services.AddSingleton(new DeskConfigStore(configPath));
     services.AddSingleton(controllerStore);
+    // Only the tray has a UI to put a marker on a screen with; a headless run answers politely and
+    // does nothing, so discovery degrades to "nothing appeared" rather than failing.
     services.AddSingleton<IDeskService, DeskService>();
     services.AddHostedService(sp => (DeskService)sp.GetRequiredService<IDeskService>());
     // Every computer answers, not just the one holding the keyboard. It is loopback-only, and a desk

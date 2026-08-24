@@ -288,14 +288,25 @@ public sealed class MacOutputHandler : IPlatformOutput, ICursor
     {
         if (msg.YDelta == 0 && msg.XDelta == 0) return;
 
+        // A real mouse wheel is a single-axis event (wheelCount 1), and macOS routes it straight
+        // down the vertical axis: views that can scroll both ways keep their predominant-axis
+        // behaviour exactly as if a mouse were plugged in. Sending wheelCount 2 with a zero
+        // horizontal axis makes those views (WebViews, tables, canvases) treat the wheel as a
+        // two-axis gesture and scroll unpredictably — the "weird" horizontal scrolling this fixes.
+        // Only a genuinely two-axis scroll (a tilt wheel, a trackpad) uses both axes.
+        var yLines = msg.YDelta / 120;
+        var xLines = msg.XDelta / 120;
+        var wheelCount = msg.XDelta != 0 ? 2u : 1u;
+
         // wire format: 120 = 1 line. convert to integer line counts for the event constructor.
         // kCGScrollEventUnitLine = 1
-        var eventRef = NativeMethods.CGEventCreateScrollWheelEvent(nint.Zero, 1, 2, msg.YDelta / 120, msg.XDelta / 120);
+        var eventRef = NativeMethods.CGEventCreateScrollWheelEvent(nint.Zero, 1, wheelCount, yLines, xLines);
         if (eventRef == nint.Zero) return;
 
         // set 16.16 fixed-point line deltas for sub-line precision (reverses input handler's fpDelta * 120 >> 16)
         NativeMethods.CGEventSetIntegerValueField(eventRef, NativeMethods.KCGScrollWheelEventFixedPtDeltaAxis1, (long)msg.YDelta * 65536 / 120);
-        NativeMethods.CGEventSetIntegerValueField(eventRef, NativeMethods.KCGScrollWheelEventFixedPtDeltaAxis2, (long)msg.XDelta * 65536 / 120);
+        if (wheelCount == 2)
+            NativeMethods.CGEventSetIntegerValueField(eventRef, NativeMethods.KCGScrollWheelEventFixedPtDeltaAxis2, (long)msg.XDelta * 65536 / 120);
 
         NativeMethods.CGEventPost(NativeMethods.KCGHidEventTap, eventRef);
         NativeMethods.CFRelease(eventRef);

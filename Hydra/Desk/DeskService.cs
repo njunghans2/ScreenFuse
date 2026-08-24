@@ -35,6 +35,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly ConcurrentDictionary<string, DeskInventoryMessage> _reports = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<DeskSetInputResultMessage>> _pending = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<DeskInventoryMessage>> _inventoryPending = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _optimistic = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _replied = new(StringComparer.OrdinalIgnoreCase);
 
@@ -228,6 +229,9 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             _log.LogDebug(ex, "Screen inventory unavailable");
         }
 
+        _log.LogDebug("Local inventory: {Monitors}",
+            string.Join("; ", monitors.Select(m => $"{m.Description}({m.DdcId})={m.CurrentInput?.ToString() ?? "null"}")));
+
         return new DeskInventoryMessage(monitors, screens);
     }
 
@@ -249,12 +253,21 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             else if (forcePush) await PersistAsync(push: true);
 
             // Once a monitor reports the computer we asked for, the optimistic guess has served
-            // its purpose and the real reports take over.
+            // its purpose and the real reports take over. A guess the reports contradict — the
+            // switch never held — must not linger either, or the desk keeps claiming a computer
+            // that is not on the monitor.
             foreach (var (id, host) in _optimistic.ToList())
-                if (merge.Views.FirstOrDefault(v => v.Id == id) is { } view && view.Sources.Any(s => s.Reachable && s.Host.Equals(host, StringComparison.OrdinalIgnoreCase)))
+            {
+                var view = merge.Views.FirstOrDefault(v => v.Id == id);
+                if (view == null) continue;
+                if (view.Sources.Any(s => s.Reachable && s.Host.Equals(host, StringComparison.OrdinalIgnoreCase))
+                    || (view.ActiveHost != null && !view.ActiveHost.Equals(host, StringComparison.OrdinalIgnoreCase)))
                     _optimistic.Remove(id);
+            }
 
             _log.LogDebug("Desk recompute: merged into {Count} monitor(s)", merge.Views.Count);
+            _log.LogDebug("Merge result: {Views}", string.Join("; ", merge.Views.Select(v =>
+                $"{v.Label}=>{v.ActiveHost ?? "none"} [{string.Join(",", v.Sources.Select(s => $"{s.Host}:{s.Input?.ToString() ?? "?"}"))}]")));
             _snapshot = BuildSnapshot(merge.Views);
 
             // The arrangement is the source of truth for where the pointer crosses. Deriving the
@@ -360,9 +373,11 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             _snapshot.ConnectedHosts.ToList(),
             _snapshot.Monitors.Select(m => new DeskStateMonitor(
                 m.Id, m.Label, m.DeskX, m.DeskY, m.Width, m.Height, m.ActiveHost,
-                m.Sources.Select(s => new DeskStateSource(s.Host, s.Input, s.Reachable)).ToList())).ToList(),
+                m.Sources.Select(s => new DeskStateSource(s.Host, s.Input, s.Reachable)).ToList(),
+                m.CrossingEnabled, m.Sleeping)).ToList(),
             _snapshot.Scenes.ToList(),
-            _snapshot.CurrentScene);
+            _snapshot.CurrentScene,
+            _controllerStore.Read());
         _log.LogDebug("Desk state -> {Peers}: {Monitors} monitor(s)", string.Join(",", _peers), message.Monitors.Count);
         Send(_peers, MessageSerializer.Encode(MessageKind.DeskState, message));
     }
@@ -411,16 +426,112 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         return new DeskActionResult(result.Accepted, result.Message);
     }
 
-    public Task<DeskActionResult> ProbeInputAsync(string monitorId, string host, int input, CancellationToken cancellationToken = default) =>
-        IsController
-            ? ProbeInputCoreAsync(monitorId, host, input, cancellationToken)
-            : Task.FromResult(Forward(new DeskCommandMessage(DeskCommandKind.ProbeInput, Monitor: monitorId, Host: host, Input: input)));
+
+    // Codes worth trying: the ones the monitor admits to, minus any already spoken for by another
+    // computer. Trying a code someone else owns can only ever prove what is already known.
+    private static List<int> Candidates(DeskMonitorConfig monitor, string host)
+    {
+        var taken = monitor.Sources
+            .Where(s => !s.Host.Equals(host, StringComparison.OrdinalIgnoreCase) && s.Input != null)
+            .Select(s => s.Input!.Value)
+            .ToHashSet();
+
+        return [.. monitor.Sources
+            .SelectMany(s => s.AvailableInputs)
+            .Distinct()
+            .Where(i => !taken.Contains(i))
+            .OrderBy(i => i)];
+    }
+
+    private async Task RevertAsync(string owner, string ddcId, int? original)
+    {
+        if (original == null) return;
+        try
+        {
+            using var cancel = new CancellationTokenSource(RemoteTimeout);
+            await SwitchAsync(owner, ddcId, original.Value, cancel.Token);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Could not put the monitor back on input {Input}", original);
+        }
+    }
+
+    private async Task RecordInputAsync(string monitorId, string host, int input)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            _config = WithMonitors(_config, _config.Monitors
+                .Select(m => m.Id != monitorId ? m : m.With(sources: Upsert(m.Sources, host, input)))
+                .ToList());
+            await PersistAsync(push: true);
+        }
+        finally { _gate.Release(); }
+        await RecomputeAsync(CancellationToken.None);
+    }
+
+    // MCCS assigns these meanings to VCP 0x60. The code stays in the name because a monitor's idea
+    // of "HDMI 1" and the socket printed on its back do not always agree.
+    private static string InputName(int code) => code switch
+    {
+        1 => "VGA 1 (1)",
+        3 => "DVI 1 (3)",
+        4 => "DVI 2 (4)",
+        15 => "DisplayPort 1 (15)",
+        16 => "DisplayPort 2 (16)",
+        17 => "HDMI 1 (17)",
+        18 => "HDMI 2 (18)",
+        _ => $"input {code}",
+    };
 
     public Task<DeskActionResult> SaveArrangementAsync(IReadOnlyList<DeskPlacement> placements, CancellationToken cancellationToken = default) =>
         IsController
             ? SaveArrangementCoreAsync(placements)
             : Task.FromResult(Forward(new DeskCommandMessage(DeskCommandKind.SaveArrangement,
                 Arrangement: placements.Select(p => new DeskArrangementEntry(p.Monitor, p.DeskX, p.DeskY, p.Width, p.Height, p.Label)).ToList())));
+
+    // Turn the pointer crossing off or on for one monitor. The crossing edges are rebuilt from the
+    // arrangement on the next recompute, so a monitor whose crossing is switched off simply stops
+    // being a way between computers.
+    public Task<DeskActionResult> SetCrossingEnabledAsync(string monitorId, bool enabled, CancellationToken cancellationToken = default) =>
+        IsController
+            ? SetCrossingEnabledCoreAsync(monitorId, enabled)
+            : Task.FromResult(Forward(new DeskCommandMessage(DeskCommandKind.SetCrossingEnabled,
+                Monitor: monitorId, CrossingEnabled: enabled)));
+
+    // Troubleshooting: bring every display on the desk back up. Wakes this computer's displays and
+    // asks every connected peer to do the same, so a monitor that drifted to sleep or lost its
+    // signal can re-lock onto the computer that should be driving it. Runs on either role; a
+    // follower forwards it to the controller.
+    public async Task<DeskActionResult> WakeAllDisplaysAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var targets = new List<string> { LocalName };
+            targets.AddRange(_peers.Where(p => !p.Equals(LocalName, StringComparison.OrdinalIgnoreCase)));
+            await Task.WhenAll(targets.Select(t => WakeForSwitchAsync(t, cancellationToken)).ToArray());
+            return DeskActionResult.Ok($"Woke the displays on {string.Join(", ", targets)}.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return DeskActionResult.Fail("Cancelled.");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Could not wake all displays");
+            return DeskActionResult.Fail($"Could not wake all displays: {ex.Message}");
+        }
+    }
+
+    // Troubleshooting: ask every connected peer to make its cursor visible again. A stranded
+    // pointer leaves a computer with a hidden cursor and no input that can recover it, so this
+    // gives the user a way back. Best effort: a peer that is away simply does not answer.
+    public Task<DeskActionResult> ResetCursorsAsync(CancellationToken cancellationToken = default)
+    {
+        Send(_peers, MessageSerializer.Encode(MessageKind.CursorReset, new CursorResetMessage()));
+        return Task.FromResult(DeskActionResult.Ok("Cursor reset requested on the connected computers."));
+    }
 
     // -- controller-side implementations ---------------------------------------------------------
 
@@ -440,7 +551,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         var target = monitor.Source(host);
 
         DeskActionResult result;
-        if (target?.Input != null && !string.IsNullOrWhiteSpace(owner) && !string.IsNullOrWhiteSpace(ddcId))
+        if (!string.IsNullOrWhiteSpace(owner) && !string.IsNullOrWhiteSpace(ddcId))
         {
             // Wake the computer we are switching *to* first, and give it a moment.
             //
@@ -451,21 +562,78 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             // than like the missing step it is.
             await WakeForSwitchAsync(host, cancel);
 
-            result = await SwitchAsync(owner!, ddcId!, target.Input.Value, cancel);
-            if (!result.Accepted) result = ExplainSwitchGap(monitor, owner, host, result.Message);
+            if (target?.Input is { } input)
+            {
+                result = await SwitchAsync(owner!, ddcId!, input, cancel);
+                if (!result.Accepted) result = ExplainSwitchGap(monitor, owner, host, result.Message);
+            }
+            else
+            {
+                result = await DiscoverAndSwitchAsync(monitor, owner!, ddcId!, host, cancel);
+            }
         }
         else result = ExplainSwitchGap(monitor, owner, host, null);
         if (!result.Accepted) return result;
 
+        // The user's choice lands on the desk right away: the optimistic assignment and the state
+        // broadcast go out now, not after the switch has been nursed through its settling. If the
+        // switch later proves not to have held, this is undone below — but the peer never sits on a
+        // stale selection while the DDC commands run.
         _optimistic[monitorId] = host;
         _snapshot = BuildSnapshot(_snapshot.Monitors
             .Select(m => m.Id == monitorId ? m with { ActiveHost = host } : m).ToList());
+        Broadcast();
+        Changed?.Invoke();
 
-        // The monitor now belongs to someone else, so the pointer crosses somewhere else. Derived
+        // A monitor switching inputs toggles its hot-plug line for a moment, and macOS reads that
+        // as a physical unplug: the display drops out of its arrangement, the Mac stops driving it,
+        // and the monitor — seeing no signal — hunts straight back to the computer it just left.
+        // Reconnect the target's displays after the switch, and if the monitor still reverted,
+        // re-assert the switch until it holds.
+var held = true;
+        if (!host.Equals(LocalName, StringComparison.OrdinalIgnoreCase))
+        {
+            await WaitForScreenAsync(host, monitor, cancel);
+            if (target?.Input is { } input)
+                held = await EnsureSwitchHeldAsync(owner!, ddcId!, monitor, host, input, cancel);
+        }
+
+        if (!held)
+        {
+            // The switch was issued but did not stick — the monitor hunted back. Say so, and put
+            // the desk back on the truth instead of leaving a phantom "shows Mac" on both peers.
+            _optimistic.Remove(monitorId);
+            await RecomputeAsync(CancellationToken.None);
+            _log.LogWarning("{Monitor} did not stay on {Host} — the monitor reverted", monitor.DisplayName(), host);
+            return DeskActionResult.Fail($"{monitor.DisplayName()} did not stay on {host} — the monitor switched away again. It is back on the computer that was driving it.");
+        }
+
+        // A monitor that was blanked as some computer's last display is moving to a live one now:
+        // the input change itself wakes its panel, and its crossings return. Done before the
+        // topology below, so a monitor blanked *by* this very switch keeps its mark.
+        await _gate.WaitAsync(cancel);
+        try
+        {
+            if (_config.Monitors.FirstOrDefault(m => m.Id == monitorId) is { Sleeping: true })
+            {
+                _config = WithMonitors(_config, _config.Monitors
+                    .Select(m => m.Id != monitorId ? m : m.With(sleeping: false, crossingEnabled: true))
+                    .ToList());
+            }
+        }
+        finally { _gate.Release(); }
+
+        // The monitor now shows another computer, so every computer it is wired to but no longer
+        // shows must drop the display from its desktop — otherwise windows and the pointer keep
+        // living on the invisible panel. The gaining computer's display is (re)connected by the
+        // wake; this handles the losers, and re-enables the gaining side's own display.
+        await ApplyTopologyForSwitchAsync(monitor, host, cancel);
+
+// The monitor now belongs to someone else, so the pointer crosses somewhere else. Derived
         // and handed over now rather than at the next round: waiting meant the crossings stayed
         // where the monitor used to be for several seconds, and the only way through was to keep
         // moving the mouse until they caught up.
-        var rebuilt = RebuildHosts(_config);
+var rebuilt = RebuildHosts(_config);
         if (!SameTopology(_config, rebuilt))
         {
             _config = rebuilt;
@@ -473,9 +641,110 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             await PersistAsync(push: true);
         }
 
+        // The optimistic view above predates the topology: a display may have been blanked (the
+        // last one of a computer) or the crossings moved. The desk the peers see must match the
+        // document, so the snapshot is rebuilt from it before it is broadcast.
+        _snapshot = BuildSnapshot(_config.Monitors.Select(ToView).ToList());
+
         Broadcast();
         Changed?.Invoke();
         return DeskActionResult.Ok($"{monitor.DisplayName()} switched to {host}.");
+    }
+
+    // One monitor's view from the document, with the live parts (which computer is on it, and
+    // which sources are reachable) carried over from the current picture.
+    private DeskMonitorView ToView(DeskMonitorConfig m)
+    {
+        var current = _snapshot.Monitors.FirstOrDefault(v => v.Id == m.Id);
+        return new DeskMonitorView(
+            m.Id, m.DisplayName(), m.DeskX, m.DeskY, m.Width, m.Height,
+            current?.ActiveHost, current?.Sources ?? [], m.CrossingEnabled, m.Sleeping);
+    }
+
+    private async Task ApplyTopologyForSwitchAsync(DeskMonitorConfig monitor, string gainingHost, CancellationToken cancel)
+    {
+        foreach (var source in monitor.Sources)
+        {
+            if (source.Host.Equals(gainingHost, StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.IsNullOrWhiteSpace(source.DdcId)) continue;
+
+            // What would stay on this host after the switch. Two special cases, and they are the
+            // point of this method's existence:
+            //  - nothing would stay: the switched monitor is its last display, and the panel is
+            //    blanked instead of removed — an OS with no display to render is a soft-locked OS;
+            //  - only unswitchable displays would stay (a laptop panel wired to nothing else): those
+            //    keep the host alive, and they too are blanked rather than left lit — the user asked
+            //    for the computer to be off.
+            var remaining = _snapshot.Monitors.Where(v =>
+                string.Equals(v.ActiveHost, source.Host, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(v.Id, monitor.Id, StringComparison.OrdinalIgnoreCase)).ToList();
+            var blank = remaining.Count == 0
+                ? new[] { monitor }
+                : remaining.All(v => v.Sources.Count <= 1) ? remaining.Select(v => _config.Monitors.FirstOrDefault(m => m.Id == v.Id)!).Where(m => m != null).ToArray() : [];
+
+            if (source.Host.Equals(LocalName, StringComparison.OrdinalIgnoreCase))
+            {
+                if (blank.Any(b => b.Id == monitor.Id))
+                {
+                    var result = await _router.SetDisplayStandbyAsync(source.DdcId, standby: true, cancel);
+                    _log.LogInformation("Last display for {Host}: blanked {DdcId} instead of disabling ({Success} {Detail})",
+                        LocalName, source.DdcId, result.Success, result.Detail);
+                    foreach (var keep in blank) await MarkSleepingAsync(keep.Id);
+                    continue;
+                }
+                var disabled = await _router.SetMonitorDisplayEnabledAsync(source.DdcId, enabled: false, cancel);
+                _log.LogInformation("Disabled local display {DdcId} for {Monitor}: {Success} {Detail}",
+                    source.DdcId, monitor.DisplayName(), disabled.Success, disabled.Detail);
+            }
+            else if (_peers.Contains(source.Host, StringComparer.OrdinalIgnoreCase))
+            {
+                if (blank.Any(b => b.Id == monitor.Id))
+                {
+                    Send([source.Host], MessageSerializer.Encode(MessageKind.SetMonitorStandby,
+                        new SetMonitorStandbyMessage(source.DdcId, Standby: true)));
+                    _log.LogInformation("Asked {Host} to blank its last display {DdcId}", source.Host, source.DdcId);
+                    foreach (var keep in blank) await MarkSleepingAsync(keep.Id);
+                    continue;
+                }
+                Send([source.Host], MessageSerializer.Encode(MessageKind.SetMonitorDisplay,
+                    new SetMonitorDisplayMessage(source.DdcId, Enabled: false)));
+                _log.LogInformation("Asked {Host} to disable its display {DdcId} for {Monitor}",
+                    source.Host, source.DdcId, monitor.DisplayName());
+                foreach (var keep in blank)
+                {
+                    if (keep.Source(source.Host) is { DdcId: not null } keepSource)
+                        Send([source.Host], MessageSerializer.Encode(MessageKind.SetMonitorStandby,
+                            new SetMonitorStandbyMessage(keepSource.DdcId, Standby: true)));
+                    await MarkSleepingAsync(keep.Id);
+                }
+            }
+        }
+
+        var gain = monitor.Source(gainingHost);
+        if (gainingHost.Equals(LocalName, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(gain?.DdcId))
+        {
+            var result = await _router.SetMonitorDisplayEnabledAsync(gain.DdcId, enabled: true, cancel);
+            _log.LogInformation("Re-enabled local display {DdcId} for {Monitor}: {Success} {Detail}",
+                gain.DdcId, monitor.DisplayName(), result.Success, result.Detail);
+        }
+    }
+
+    // Records that one monitor is the blanked last display of its computer: the crossing edges are
+    // cut (a pointer must never enter a black panel), and the state is persisted and shared.
+    private async Task MarkSleepingAsync(string monitorId)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            var monitors = _config.Monitors
+                .Select(m => m.Id != monitorId ? m : m.With(sleeping: true, crossingEnabled: false))
+                .ToList();
+            _config = WithMonitors(_config, monitors);
+            _config = RebuildHosts(_config);
+            ApplyLayout();
+            await PersistAsync(push: true);
+        }
+        finally { _gate.Release(); }
     }
 
     // Asks a computer to drive its displays again, so that a monitor switched to it finds a signal.
@@ -492,21 +761,49 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             }
             else
             {
-                var requestId = Guid.NewGuid().ToString("N");
-                var completion = new TaskCompletionSource<DeskSetInputResultMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-                _pending[requestId] = completion;
-                try
-                {
-                    Send([host], MessageSerializer.Encode(MessageKind.DeskDisplayPower, new DeskDisplayPowerMessage(requestId, Wake: true)));
-                    await completion.Task.WaitAsync(RemoteTimeout, cancel);
-                }
-                finally { _pending.TryRemove(requestId, out _); }
+                // Fire-and-forget: the wake is best effort and the switch must not stall behind a
+                // busy peer (a machine re-enumerating its displays can take a while to answer).
+                // The settle below gives the request time to land before the monitor is switched.
+                Send([host], MessageSerializer.Encode(MessageKind.DeskDisplayPower,
+                    new DeskDisplayPowerMessage(Guid.NewGuid().ToString("N"), Wake: true)));
             }
 
             // Output does not come back the instant it is asked for. Switching into a signal that is
             // still arriving is the same as switching into no signal at all.
             var settle = _config.Profiles.FirstOrDefault()?.DisplayRouting.SettleDelayMs ?? 500;
             if (settle > 0) await Task.Delay(settle, cancel);
+
+            // A monitor arriving means the desk is coming back to this computer, so any display
+            // that was blanked as its last one wakes: the panel comes back, the crossing edges
+            // return, and the computer is fully itself again.
+            await _gate.WaitAsync(cancel);
+            try
+            {
+                var slept = _config.Monitors.Where(m => m.Sleeping
+                    && string.Equals(_snapshot.Monitors.FirstOrDefault(v => v.Id == m.Id)?.ActiveHost, host, StringComparison.OrdinalIgnoreCase)).ToList();
+                if (slept.Count > 0)
+                {
+                    var monitors = _config.Monitors
+                        .Select(m => !slept.Any(s => s.Id == m.Id) ? m : m.With(sleeping: false, crossingEnabled: true))
+                        .ToList();
+                    _config = WithMonitors(_config, monitors);
+                    _config = RebuildHosts(_config);
+                    ApplyLayout();
+                    await PersistAsync(push: true);
+                    foreach (var m in slept)
+                    {
+                        var source = m.Source(host)?.DdcId;
+                        if (source == null) continue;
+                        if (host.Equals(LocalName, StringComparison.OrdinalIgnoreCase))
+                            await _router.SetDisplayStandbyAsync(source, standby: false, cancel);
+                        else
+                            Send([host], MessageSerializer.Encode(MessageKind.SetMonitorStandby,
+                                new SetMonitorStandbyMessage(source, Standby: false)));
+                    }
+                    _log.LogInformation("Woke {Count} blanked display(s) on {Host}", slept.Count, host);
+                }
+            }
+            finally { _gate.Release(); }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -514,13 +811,160 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         }
     }
 
-    // Explains what is missing and what to do about it.
-    //
-    // There is deliberately no automatic fallback here. Putting the losing computer's displays to
-    // sleep looks like it would work and does not: ScreenFuse is forwarding input to that computer,
-    // so the first mouse move wakes the display straight back up and the monitor returns. Video
-    // output would have to be switched off rather than idled, and no operating system offers that
-    // for one monitor of several. Saying what is missing beats doing something that undoes itself.
+    // An unknown cable is probed automatically only when a changed display inventory can prove the
+    // target gained the panel. Some display stacks retain inactive panels, so a plain VCP read is
+    // deliberately not enough evidence: accepting that would permanently save the first arbitrary
+    // socket we tried.
+    private async Task<DeskActionResult> DiscoverAndSwitchAsync(
+        DeskMonitorConfig monitor, string owner, string ddcId, string target, CancellationToken cancel)
+    {
+        if (!target.Equals(LocalName, StringComparison.OrdinalIgnoreCase)
+            && !_peers.Contains(target, StringComparer.OrdinalIgnoreCase))
+            return DeskActionResult.Fail($"{target} is disconnected, so ScreenFuse will wait to discover its input on {monitor.DisplayName()}.");
+
+        var candidates = Candidates(monitor, target);
+        if (candidates.Count == 0)
+            return DeskActionResult.Fail($"ScreenFuse has no unassigned input codes to try for {target} on {monitor.DisplayName()}.");
+
+        var original = monitor.Source(owner)?.Input;
+        var discovered = false;
+        try
+        {
+            foreach (var candidate in candidates)
+            {
+                var switched = await SwitchAsync(owner, ddcId, candidate, cancel);
+                if (!switched.Accepted) continue;
+
+                // The monitor's input change makes its hot-plug line drop for a moment and macOS
+                // reads that as an unplug, so the target's display for this monitor has to be
+                // reconnected — otherwise the candidate has no signal to show. Then verify by
+                // reading the monitor's current input back from the computer that can command it:
+                // the monitor accepted the candidate only if it now reports it. (The target's own
+                // screen list is not proof — macOS lists a connected panel whether or not the
+                // monitor is displaying it.)
+                if (await WaitForInputAsync(owner, monitor, target, candidate, cancel))
+                {
+                    discovered = true;
+                    await RecordInputAsync(monitor.Id, target, candidate);
+                    return DeskActionResult.Ok($"{monitor.DisplayName()} automatically found {target} on {InputName(candidate)}.");
+                }
+            }
+
+            return DeskActionResult.Fail($"ScreenFuse could not verify an input for {target} on {monitor.DisplayName()} yet; it will retry automatically when that display reconnects.");
+        }
+        finally
+        {
+            if (!discovered) await RevertAsync(owner, ddcId, original);
+        }
+    }
+
+    private async Task<bool> WaitForInputAsync(string owner, DeskMonitorConfig monitor, string target, int candidate, CancellationToken cancel)
+    {
+        var settle = _config.Profiles.FirstOrDefault()?.DisplayRouting.SettleDelayMs ?? 500;
+        for (var attempt = 0; attempt < 6; attempt++)
+        {
+            if (settle > 0 && attempt == 0) await Task.Delay(settle, cancel);
+            // Reconnect the target's displays — the monitor's input change makes its hot-plug line
+            // drop for a moment, and macOS reads that as an unplug. The drop can lag the switch, so
+            // keep re-asking until the monitor actually reports the candidate input.
+            await WakeForSwitchAsync(target, cancel);
+            var inventory = await RequestInventoryAsync(owner, cancel);
+            if (CurrentInputOf(inventory, monitor) == candidate) return true;
+            if (attempt < 5) await Task.Delay(750, cancel);
+        }
+        return false;
+    }
+
+    private static int? CurrentInputOf(DeskInventoryMessage? inventory, DeskMonitorConfig monitor)
+    {
+        if (inventory == null) return null;
+        string?[] names = [monitor.Label ?? monitor.Id, .. monitor.Aliases];
+        var report = inventory.Monitors.FirstOrDefault(r => DeskMerge.SameMonitor(
+            names.Where(n => !string.IsNullOrWhiteSpace(n)).Select(n => n!),
+            new[] { r.Description, r.DdcId }.Where(n => !string.IsNullOrWhiteSpace(n)).Select(n => n!)));
+        return report?.CurrentInput;
+    }
+
+    // Whether the target's display server currently lists the monitor as one of its screens — i.e.
+    // the display is back in its arrangement. The monitor's own input change makes its hot-plug line
+    // drop for a moment, and macOS reads that as an unplug and removes the display, so the target is
+    // re-asked to reconnect its displays before every check, and the checks continue for a few
+    // seconds (the display server polls its screens every couple of seconds).
+    private async Task<bool> WaitForScreenAsync(string host, DeskMonitorConfig monitor, CancellationToken cancel)
+    {
+        var settle = _config.Profiles.FirstOrDefault()?.DisplayRouting.SettleDelayMs ?? 500;
+        for (var attempt = 0; attempt < 6; attempt++)
+        {
+            if (settle > 0 && attempt == 0) await Task.Delay(settle, cancel);
+            // Reconnect the target's displays — the monitor's input change makes its hot-plug line
+            // drop for a moment, and macOS reads that as an unplug and removes the display. The
+            // drop can lag the switch, so keep re-asking until the display is back in the
+            // arrangement (the display server polls its screens every couple of seconds).
+            await WakeForSwitchAsync(host, cancel);
+            var inventory = await RequestInventoryAsync(host, cancel);
+            if (inventory != null && ReportsScreen(inventory, monitor)) return true;
+            if (attempt < 5) await Task.Delay(700, cancel);
+        }
+        return false;
+    }
+
+    private static bool ReportsScreen(DeskInventoryMessage inventory, DeskMonitorConfig monitor)
+    {
+        string?[] names = [monitor.Label ?? monitor.Id, .. monitor.Aliases];
+        return inventory.Screens.Any(screen => DeskMerge.SameMonitor(
+            names.Where(n => !string.IsNullOrWhiteSpace(n)).Select(n => n!),
+            new[] { screen.DisplayName, screen.ScreenId }.Where(n => !string.IsNullOrWhiteSpace(n)).Select(n => n!)));
+    }
+
+    // A switched monitor can quietly revert: its input change drops its hot-plug line for a
+    // moment, macOS removes the display, and the monitor hunts back to the signal it can still
+    // see. Read the monitor's input back from the computer that commands it, and re-assert the
+    // switch (waking the target first) until it actually holds.
+    private async Task<bool> EnsureSwitchHeldAsync(string owner, string ddcId, DeskMonitorConfig monitor, string target, int input, CancellationToken cancel)
+    {
+        // The switch's hot-plug blip makes macOS drop the display, and the monitor hunts for a
+        // signal it does not see within a couple of seconds. Wake aggressively — every ~400ms —
+        // so the display is back on the target before the hunt begins; re-assert the switch only
+        // if the monitor has already moved away.
+        var known = monitor.Sources.SelectMany(s => s.AvailableInputs).Distinct().ToList();
+        int? lastHonest = null;
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            await WakeForSwitchAsync(target, cancel);
+            await Task.Delay(300, cancel);
+            var inventory = await RequestInventoryAsync(owner, cancel);
+            var current = CurrentInputOf(inventory, monitor);
+            _log.LogInformation("Switch hold check {Attempt}: {Monitor} reads input {Current}, want {Want}",
+                attempt + 1, monitor.DisplayName(), current?.ToString() ?? "null", input);
+            if (current == input) return true;
+            // A reading the monitor does not admit to — the helper answered another panel, or the
+            // monitor's DDC is wedged mid-scan — cannot disprove the switch, so it is not treated
+            // as evidence the monitor moved. Only an honest reading of a different socket is.
+            if (current is { } c && (known.Count == 0 || known.Contains(c))) lastHonest = c;
+            var result = await SwitchAsync(owner, ddcId, input, cancel);
+            if (!result.Accepted) return false;
+        }
+        // Every reading was nonsense the monitor does not admit to: there is no evidence the
+        // switch failed, and reverting would send the panel back to the dead socket it came from.
+        return lastHonest == null;
+    }
+
+    private async Task<DeskInventoryMessage?> RequestInventoryAsync(string host, CancellationToken cancel)
+    {
+        if (host.Equals(LocalName, StringComparison.OrdinalIgnoreCase)) return await BuildInventoryAsync(cancel);
+
+        var completion = new TaskCompletionSource<DeskInventoryMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_inventoryPending.TryAdd(host, completion)) return null;
+        try
+        {
+            Send([host], MessageSerializer.Encode(MessageKind.DeskInventoryRequest, new DeskInventoryRequestMessage()));
+            return await completion.Task.WaitAsync(RemoteTimeout, cancel);
+        }
+        catch (TimeoutException) { return null; }
+        finally { _inventoryPending.TryRemove(host, out _); }
+    }
+
+    // Explains why a normal switch could not start.
     private DeskActionResult ExplainSwitchGap(DeskMonitorConfig monitor, string? owner, string host, string? ddcFailure)
     {
         if (host.Equals(owner, StringComparison.OrdinalIgnoreCase))
@@ -530,14 +974,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         if (string.IsNullOrWhiteSpace(owner))
             return DeskActionResult.Fail($"No connected computer can reach {monitor.DisplayName()} right now, so its input cannot be switched.");
 
-        // The monitor has already said which codes it accepts, so name the ones still unaccounted
-        // for — that is a short list to try rather than an open question.
-        var taken = monitor.Sources.Where(s => s.Input != null).Select(s => s.Input!.Value).ToHashSet();
-        var candidates = (monitor.Source(owner!)?.AvailableInputs ?? []).Where(i => !taken.Contains(i)).ToList();
-        var hint = candidates.Count > 0
-            ? $" It accepts {string.Join(", ", candidates)} besides the codes already known — try those under 'How each computer is wired'."
-            : " Set it under 'How each computer is wired'.";
-        return DeskActionResult.Fail($"ScreenFuse does not know which input on {monitor.DisplayName()} shows {host}.{hint}");
+        return DeskActionResult.Fail($"ScreenFuse cannot reach {monitor.DisplayName()} to switch it to {host}.");
     }
 
     private async Task<DeskActionResult> SwitchAsync(string owner, string ddcId, int input, CancellationToken cancel)
@@ -562,36 +999,6 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             return DeskActionResult.Fail($"{owner} did not answer the switch request.");
         }
         finally { _pending.TryRemove(requestId, out _); }
-    }
-
-    private async Task<DeskActionResult> ProbeInputCoreAsync(string monitorId, string host, int input, CancellationToken cancel)
-    {
-        var monitor = _config.Monitor(monitorId);
-        if (monitor == null) return DeskActionResult.Fail($"Unknown monitor '{monitorId}'.");
-        if (input is < 0 or > 255) return DeskActionResult.Fail("An input code must be between 0 and 255.");
-
-        await _gate.WaitAsync(cancel);
-        try
-        {
-            _config = WithMonitors(_config, _config.Monitors
-                .Select(m => m.Id != monitorId ? m : m.With(sources: Upsert(m.Sources, host, input)))
-                .ToList());
-            await PersistAsync(push: true);
-        }
-        finally { _gate.Release(); }
-
-        var view = _snapshot.Monitors.FirstOrDefault(m => m.Id == monitorId);
-        var owner = view?.Sources.FirstOrDefault(s => s.Reachable)?.Host;
-        if (string.IsNullOrWhiteSpace(owner))
-            return DeskActionResult.Ok($"Saved input {input} for {host}. No computer can reach {monitor.DisplayName()} right now, so it was not tried.");
-        var ddcId = _config.Monitor(monitorId)?.Source(owner!)?.DdcId;
-        if (string.IsNullOrWhiteSpace(ddcId))
-            return DeskActionResult.Ok($"Saved input {input} for {host}.");
-
-        var result = await SwitchAsync(owner!, ddcId!, input, cancel);
-        return result.Accepted
-            ? DeskActionResult.Ok($"Saved input {input} for {host} and switched {monitor.DisplayName()} to it — check whether {host} is on screen.")
-            : DeskActionResult.Ok($"Saved input {input} for {host}, but the monitor did not accept it: {result.Message}");
     }
 
     private static List<MonitorSourceConfig> Upsert(List<MonitorSourceConfig> sources, string host, int input)
@@ -636,6 +1043,27 @@ public sealed class DeskService : SimpleHostedService, IDeskService
 
         await RecomputeAsync(CancellationToken.None);
         return DeskActionResult.Ok("Arrangement saved. The crossing edges were rebuilt from it.");
+    }
+
+    private async Task<DeskActionResult> SetCrossingEnabledCoreAsync(string monitorId, bool enabled)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            var monitors = _config.Monitors
+                .Select(m => m.Id != monitorId ? m : m.With(crossingEnabled: enabled))
+                .ToList();
+            _config = WithMonitors(_config, monitors);
+            _config = RebuildHosts(_config);
+            ApplyLayout();
+            await PersistAsync(push: true);
+        }
+        finally { _gate.Release(); }
+
+        await RecomputeAsync(CancellationToken.None);
+        return DeskActionResult.Ok(enabled
+            ? "Mouse sharing turned on for this monitor."
+            : "Mouse sharing turned off for this monitor.");
     }
 
     private async Task<DeskActionResult> SaveSceneCoreAsync(string name)
@@ -877,11 +1305,24 @@ public sealed class DeskService : SimpleHostedService, IDeskService
     private Task OnPeersChanged(string[] peers)
     {
         var added = peers.Except(_peers, StringComparer.OrdinalIgnoreCase).ToArray();
+        var gone = _peers.Except(peers, StringComparer.OrdinalIgnoreCase).ToArray();
         _peers = peers;
-        foreach (var gone in _reports.Keys.Where(k => !k.Equals(LocalName, StringComparison.OrdinalIgnoreCase) && !peers.Contains(k, StringComparer.OrdinalIgnoreCase)).ToList())
-            _reports.TryRemove(gone, out _);
+        foreach (var missing in _reports.Keys.Where(k => !k.Equals(LocalName, StringComparison.OrdinalIgnoreCase) && !peers.Contains(k, StringComparer.OrdinalIgnoreCase)).ToList())
+            _reports.TryRemove(missing, out _);
         _replied.RemoveWhere(h => !peers.Contains(h, StringComparer.OrdinalIgnoreCase));
+        // Optimistic ownership only bridges the short interval between a DDC command and the next
+        // inventory. Retaining it after a peer disappears leaves crossings pointing at a powered-off
+        // desktop, which in turn strands windows on a display nobody can see.
+        foreach (var monitor in _optimistic.Where(pair => gone.Contains(pair.Value, StringComparer.OrdinalIgnoreCase)).Select(pair => pair.Key).ToList())
+            _optimistic.Remove(monitor);
         Greet(added);
+        return IsController && gone.Length > 0
+            ? RecomputeAsync(CancellationToken.None)
+            : NotifyChangedAsync();
+    }
+
+    private Task NotifyChangedAsync()
+    {
         Changed?.Invoke();
         return Task.CompletedTask;
     }
@@ -890,7 +1331,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
     {
         if (kind is MessageKind.DeskInventory or MessageKind.DeskState or MessageKind.DeskCommand
             or MessageKind.DeskConfigPush or MessageKind.DeskSetInput or MessageKind.DeskSetInputResult
-            or MessageKind.DeskDisplayPower)
+            or MessageKind.DeskDisplayPower or MessageKind.DeskInventoryRequest)
         {
             _replied.Add(sourceHost);
             _log.LogDebug("Desk message {Kind} from {Host} (controller={IsController})", kind, sourceHost, IsController);
@@ -899,9 +1340,17 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         switch (kind)
         {
             case MessageKind.DeskInventory when IsController:
-                _reports[sourceHost] = new DecodedMessage(kind, body).Deserialize<DeskInventoryMessage>();
+            {
+                var inventory = new DecodedMessage(kind, body).Deserialize<DeskInventoryMessage>();
+                _log.LogDebug("Inventory from {Host}: {Monitors} screens={Screens}",
+                    sourceHost,
+                    string.Join("; ", inventory.Monitors.Select(m => $"{m.Description}={m.CurrentInput?.ToString() ?? "null"}")),
+                    string.Join("; ", inventory.Screens.Select(s => $"{s.DisplayName ?? s.ScreenId}")));
+                _reports[sourceHost] = inventory;
+                if (_inventoryPending.TryGetValue(sourceHost, out var completion)) completion.TrySetResult(inventory);
                 await RecomputeAsync(CancellationToken.None);
                 break;
+            }
 
             case MessageKind.DeskSetInput:
             {
@@ -916,10 +1365,36 @@ public sealed class DeskService : SimpleHostedService, IDeskService
                 Greet([sourceHost]);
                 break;
 
+            case MessageKind.DeskInventoryRequest:
+                Send([sourceHost], MessageSerializer.Encode(MessageKind.DeskInventory, await BuildInventoryAsync(CancellationToken.None)));
+                break;
+
+            case MessageKind.SetMonitorDisplay:
+            {
+                var request = new DecodedMessage(kind, body).Deserialize<SetMonitorDisplayMessage>();
+                var result = await _router.SetMonitorDisplayEnabledAsync(request.LocalSourceId, request.Enabled);
+                if (!result.Success)
+                    _log.LogDebug("Could not {Action} the display for {Source}: {Detail}",
+                        request.Enabled ? "re-enable" : "disable", request.LocalSourceId, result.Detail);
+                break;
+            }
+
+            case MessageKind.SetMonitorStandby:
+            {
+                var request = new DecodedMessage(kind, body).Deserialize<SetMonitorStandbyMessage>();
+                var result = await _router.SetDisplayStandbyAsync(request.LocalSourceId, request.Standby);
+                _log.LogInformation("Display standby {Standby} for {Source}: {Success} {Detail}",
+                    request.Standby ? "on" : "off", request.LocalSourceId, result.Success, result.Detail);
+                break;
+            }
+
             case MessageKind.DeskDisplayPower:
             {
                 var request = new DecodedMessage(kind, body).Deserialize<DeskDisplayPowerMessage>();
+                _log.LogInformation("Display power request from {Host}: wake={Wake}", sourceHost, request.Wake);
                 var result = await _router.SetDisplayPowerAsync(request.Wake);
+                _log.LogInformation("Display power {Action} on this computer: {Success} {Detail}",
+                    request.Wake ? "wake" : "sleep", result.Success, result.Detail);
                 Send([sourceHost], MessageSerializer.Encode(MessageKind.DeskSetInputResult,
                     new DeskSetInputResultMessage(request.RequestId, result.Success, result.Detail)));
                 break;
@@ -936,11 +1411,24 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             {
                 var state = new DecodedMessage(kind, body).Deserialize<DeskStateMessage>();
                 _controller = state.Controller;
+
+                // The controller's hand-taken control travels with the state, so a machine that
+                // missed the handover command still ends up agreeing on the next broadcast —
+                // the configuration must be the same on every computer.
+                try
+                {
+                    if (state.ControllerOverride is { } overrideHost)
+                        _controllerStore.Write(overrideHost);
+                    else
+                        _controllerStore.Clear();
+                }
+                catch (Exception ex) { _log.LogDebug(ex, "Could not mirror the controller override"); }
                 _snapshot = new DeskSnapshot(
                     state.Controller, LocalName, state.Hosts, state.ConnectedHosts,
                     state.Monitors.Select(m => new DeskMonitorView(
                         m.Id, m.Label, m.DeskX, m.DeskY, m.Width, m.Height, m.ActiveHost,
-                        m.Sources.Select(s => new DeskSourceView(s.Host, s.Input, s.Reachable)).ToList())).ToList(),
+                        m.Sources.Select(s => new DeskSourceView(s.Host, s.Input, s.Reachable)).ToList(),
+                        m.CrossingEnabled, m.Sleeping)).ToList(),
                     state.Scenes, state.CurrentScene, IsController: false, Crossings: Crossings());
 
                 // The desk we are shown and the desk we hold are different things: the picture
@@ -986,9 +1474,9 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             DeskCommandKind.SaveScene => await SaveSceneCoreAsync(command.Scene ?? ""),
             DeskCommandKind.DeleteScene => await DeleteSceneCoreAsync(command.Scene ?? ""),
             DeskCommandKind.ActivateScene => await ActivateSceneAsync(command.Scene ?? ""),
-            DeskCommandKind.ProbeInput => await ProbeInputCoreAsync(command.Monitor ?? "", command.Host ?? "", command.Input ?? 0, CancellationToken.None),
             DeskCommandKind.SaveArrangement => await SaveArrangementCoreAsync(
                 (command.Arrangement ?? []).Select(a => new DeskPlacement(a.Monitor, a.DeskX, a.DeskY, a.Width, a.Height, a.Label)).ToList()),
+            DeskCommandKind.SetCrossingEnabled => await SetCrossingEnabledCoreAsync(command.Monitor ?? "", command.CrossingEnabled),
             _ => DeskActionResult.Fail($"Unsupported desk command {command.Kind}."),
         };
         if (!result.Accepted) _log.LogWarning("Desk command {Kind} from {Host} refused: {Message}", command.Kind, sourceHost, result.Message);

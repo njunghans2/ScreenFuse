@@ -269,6 +269,60 @@ public class TwoComputerDeskTests
         }
     }
 
+    [Test]
+    public async Task ADisconnectedHostImmediatelyLosesItsOptimisticMonitorOwnership()
+    {
+        using var desk = await Desk.ConvergedAsync();
+        var aorus = await desk.SwitchableAorusAsync();
+        await desk.SwitchAsync(aorus, "Mac");
+
+        await desk.Windows.Relay.FirePeersChanged();
+
+        Assert.That(desk.Windows.Snapshot.Monitors.Single(m => m.Id == aorus).ActiveHost, Is.Not.EqualTo("Mac"),
+            "a switched-off computer must not retain a display assignment or crossings after it leaves the relay");
+    }
+
+    [Test]
+    public async Task SwitchingTheLastMonitorAwayBlanksItInsteadOfRemovingIt()
+    {
+        // An OS with no display to render is a soft-locked OS: the last display is never removed
+        // from the desktop — its panel is blanked instead, and it stays that way until a switch
+        // brings another display (or itself) back.
+        using var desk = await Desk.ConvergedAsync();
+
+        await desk.SwitchAsync(desk.Aorus, "Mac");
+        await desk.SwitchAsync(desk.Benq, "Mac");
+
+        using (Assert.EnterMultipleScope())
+        {
+            var commands = desk.Windows.Router.Commands;
+            Assert.That(commands, Does.Not.Contain(@"disable \\.\DISPLAY2"),
+                "the last display must not be removed from the desktop");
+            Assert.That(commands, Does.Contain(@"blank \\.\DISPLAY2"),
+                "the last display is blanked instead of removed");
+            var benq = desk.Windows.Snapshot.Monitors.Single(m => m.Id == desk.Benq);
+            Assert.That(benq.Sleeping, Is.True, "the desk records that the monitor is the blanked last display");
+            Assert.That(benq.CrossingEnabled, Is.False, "a black panel is not a crossing destination");
+        }
+    }
+
+    [Test]
+    public async Task SwitchingAMonitorBackWakesTheBlankedLastDisplay()
+    {
+        using var desk = await Desk.ConvergedAsync();
+        await desk.SwitchAsync(desk.Aorus, "Mac");
+        await desk.SwitchAsync(desk.Benq, "Mac");
+
+        await desk.SwitchAsync(desk.Benq, "NINOG");
+
+        var benq = desk.Windows.Snapshot.Monitors.Single(m => m.Id == desk.Benq);
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(benq.Sleeping, Is.False, "the monitor that returns is not blanked anymore");
+            Assert.That(benq.CrossingEnabled, Is.True, "its crossings come back with it");
+        }
+    }
+
     private sealed class Desk : IDisposable
     {
         public required Node Windows { get; init; }
@@ -284,14 +338,11 @@ public class TwoComputerDeskTests
             Windows.Snapshot.Monitors.Single(m => m.Width == width).Id;
 
 
-        // The AORUS with both sockets known, which is what makes it switchable at all. The Mac
-        // cannot read that monitor while Windows is on it, so in real use the code is either learned
-        // the one time the Mac is on screen or entered by hand; either way it ends up here.
+        // This fixture seeds the two known cables; production learns them from display inventories.
         public async Task<string> SwitchableAorusAsync()
         {
             var aorus = Windows.Snapshot.Monitors.Single(m => m.Width == 2560);
-            await Windows.Service.ProbeInputAsync(aorus.Id, "Mac", 17);
-            await Wire.DrainAsync();
+            await Task.CompletedTask;
             return aorus.Id;
         }
 
@@ -307,6 +358,8 @@ public class TwoComputerDeskTests
             }
             await switching;
         }
+
+
         public async Task ArrangeAsync(params (string Id, int X, int Y)[] places)
         {
             var byId = Windows.Snapshot.Monitors.ToDictionary(m => m.Id);
@@ -447,6 +500,20 @@ public class TwoComputerDeskTests
         private static HydraConfigFile Seed(string name, Mode mode) => new()
         {
             Name = name,
+            Monitors =
+            [
+                new DeskMonitorConfig
+                {
+                    Id = "aorus",
+                    Label = "AORUS",
+                    Aliases = ["AORUS"],
+                    Sources =
+                    [
+                        new MonitorSourceConfig { Host = "NINOG", Input = 15, DdcId = @"\\.\DISPLAY1", AvailableInputs = [1, 3, 15, 17] },
+                        new MonitorSourceConfig { Host = "Mac", Input = 17 },
+                    ],
+                },
+            ],
             Profiles =
             [
                 new HydraConfig
@@ -543,12 +610,26 @@ public class TwoComputerDeskTests
         public Task<DisplayCommandResult> SetInputAsync(string id, int input, CancellationToken cancellationToken = default)
         {
             Commands.Add($"input {id}={input}");
+            // emulate hardware: the monitor now reports the new input as its current one
+            for (var i = 0; i < monitors.Count; i++)
+                if (monitors[i].Id == id || monitors[i].LogicalName == id || monitors[i].Description.Contains(id, StringComparison.OrdinalIgnoreCase))
+                    monitors[i] = monitors[i] with { CurrentInput = input };
             return Task.FromResult(new DisplayCommandResult($"set {id} input {input}", true));
         }
         public Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default)
         {
             Commands.Add(wake ? "wake" : "sleep");
             return Task.FromResult(new DisplayCommandResult("power", true));
+        }
+        public Task<DisplayCommandResult> SetMonitorDisplayEnabledAsync(string localSourceId, bool enabled, CancellationToken cancellationToken = default)
+        {
+            Commands.Add(enabled ? $"enable {localSourceId}" : $"disable {localSourceId}");
+            return Task.FromResult(new DisplayCommandResult("display", true));
+        }
+        public Task<DisplayCommandResult> SetDisplayStandbyAsync(string localSourceId, bool standby, CancellationToken cancellationToken = default)
+        {
+            Commands.Add(standby ? $"blank {localSourceId}" : $"unblank {localSourceId}");
+            return Task.FromResult(new DisplayCommandResult("standby", true));
         }
     }
 

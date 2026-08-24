@@ -11,7 +11,11 @@ public record DeskMonitorView(
     int Width,
     int Height,
     string? ActiveHost,
-    IReadOnlyList<DeskSourceView> Sources)
+    IReadOnlyList<DeskSourceView> Sources,
+    bool CrossingEnabled = true,
+    // Blanked as the last display of a computer: it still shows that computer, but black, and the
+    // pointer may not enter it until a switch brings the desk back.
+    bool Sleeping = false)
 {
     // More than one computer is wired to it. Whether the switch can actually be carried out also
     // needs an input code for the target, which the desk learns or the user supplies once.
@@ -74,9 +78,18 @@ public interface IDeskService
     Task<DeskActionResult> DeleteSceneAsync(string name, CancellationToken cancellationToken = default);
     Task<DeskActionResult> ActivateSceneAsync(string name, CancellationToken cancellationToken = default);
 
-    // Try an input code on a monitor so the user can confirm which cable it selects.
-    Task<DeskActionResult> ProbeInputAsync(string monitorId, string host, int input, CancellationToken cancellationToken = default);
+    // Troubleshooting: wake the displays on this computer and on every connected peer, so monitors
+    // that drifted to sleep or lost their signal can re-lock onto the right computer.
+    Task<DeskActionResult> WakeAllDisplaysAsync(CancellationToken cancellationToken = default);
+
+    // Troubleshooting: ask every connected peer to restore its cursor (a stranded pointer leaves a
+    // machine with a hidden cursor and no way back).
+    Task<DeskActionResult> ResetCursorsAsync(CancellationToken cancellationToken = default);
 
     // Persist the arrangement the user dragged, and rebuild the crossing edges from it.
     Task<DeskActionResult> SaveArrangementAsync(IReadOnlyList<DeskPlacement> placements, CancellationToken cancellationToken = default);
+
+    // Turn the pointer crossing on or off for one monitor. Off, the pointer cannot leave or enter
+    // through it; the monitor keeps showing whatever computer drives it. Defaults to on.
+    Task<DeskActionResult> SetCrossingEnabledAsync(string monitorId, bool enabled, CancellationToken cancellationToken = default);
 }

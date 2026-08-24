@@ -4,8 +4,10 @@ namespace Hydra.Display;
 
 internal static class WindowsDdc
 {
-    private const uint MonitorDefaultToNearest = 2;
     private const byte InputSelectVcp = 0x60;
+    private const byte DisplayPowerVcp = 0xD6;
+    private const uint OnMode = 0x01;
+    private const uint StandbyMode = 0x04;
     private const uint WmSysCommand = 0x0112;
     private const nuint ScMonitorPower = 0xF170;
     private static readonly nint HwndBroadcast = new(0xffff);
@@ -144,6 +146,32 @@ internal static class WindowsDdc
     {
         var result = SendNotifyMessageW(HwndBroadcast, WmSysCommand, ScMonitorPower, wake ? new nint(-1) : new nint(2));
         return new(wake ? "wake displays" : "sleep displays", result, result ? null : $"Win32 error {Marshal.GetLastWin32Error()}");
+    }
+
+    // Puts one physical panel to sleep (VCP 0xD6 = standby) or wakes it (0xD6 = on). The panel
+    // blacks out but the display stays part of the desktop — the one case where removing the
+    // display would leave the OS with nothing to render, which is how an OS soft-locks.
+    internal static DisplayCommandResult SetDisplayStandby(string id, bool standby)
+    {
+        var monitors = Enumerate();
+        try
+        {
+            var matches = monitors.Where(m => id == "*"
+                || m.Description.Contains(id, StringComparison.OrdinalIgnoreCase)
+                || m.LogicalName.Equals(id, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (matches.Count == 0)
+                return new($"set {id} display power", false, "No matching physical monitor");
+
+            var failures = new List<string>();
+            foreach (var monitor in matches)
+            {
+                if (!SetVCPFeature(monitor.Handle, DisplayPowerVcp, standby ? (uint)StandbyMode : OnMode))
+                    failures.Add($"{monitor.Description}: Win32 error {Marshal.GetLastWin32Error()}");
+            }
+            return new($"set {id} display power", failures.Count == 0,
+                failures.Count == 0 ? $"Updated {matches.Count} monitor(s)" : string.Join("; ", failures));
+        }
+        finally { Close(monitors); }
     }
 
     private static List<PhysicalMonitor> Enumerate()

@@ -15,6 +15,7 @@ using Cathedral.Utils;
 using Hydra.Config;
 using Hydra.Desk;
 using Hydra.Display;
+using Hydra.Platform;
 using Microsoft.Extensions.Logging;
 
 namespace Hydra.Tray;
@@ -23,6 +24,7 @@ internal sealed class SettingsWindow : Window
 {
     private readonly string _configPath;
     private readonly IDisplayRouter _displayRouter;
+    private readonly Hydra.Screen.InputRouter? _inputRouter;
     private readonly Action _restartAfterSave;
     private readonly IDeskService? _desk;
     private readonly TextBlock _status;
@@ -36,13 +38,15 @@ internal sealed class SettingsWindow : Window
     private readonly CheckBox _screenLock = new() { Content = "Lock the other computers when this computer locks" };
     private readonly CheckBox _hideCursor = new() { Content = "Hide an idle cursor", IsChecked = false };
     private readonly CheckBox _accelerateWheel = new() { Content = "Smooth accelerated scrolling", IsChecked = true };
+    private readonly CheckBox _startOnStartup = new() { Content = "Start ScreenFuse when I sign in", IsChecked = false, IsEnabled = false };
     private HydraConfigFile? _loaded;
 
-    internal SettingsWindow(string configPath, IDisplayRouter? displayRouter, IDeskService? desk, string? initialStatus, Action restartAfterSave)
+    internal SettingsWindow(string configPath, IDisplayRouter? displayRouter, IDeskService? desk, string? initialStatus, Action restartAfterSave, Hydra.Screen.InputRouter? inputRouter = null)
     {
         _configPath = Path.GetFullPath(configPath);
         _displayRouter = displayRouter ?? new DisplayRouter(Microsoft.Extensions.Logging.Abstractions.NullLogger<DisplayRouter>.Instance);
         _desk = desk;
+        _inputRouter = inputRouter;
         _restartAfterSave = restartAfterSave;
         Title = "ScreenFuse Settings";
         Width = 980;
@@ -69,17 +73,13 @@ internal sealed class SettingsWindow : Window
                 Tab("Monitors", MonitorsTab()),
                 Tab("Connection", ConnectionTab()),
                 Tab("Preferences", PreferencesTab()),
+                Tab("Troubleshoot", TroubleshootTab()),
             },
         };
 
-        var save = Action("Save and restart", SaveAsync, accent: true);
-        var diagnostics = Action("Display diagnostics", DiagnosticsAsync);
-        var startup = Action("Launch on startup", InstallStartupAsync);
-        var close = Action("Close", () => { Close(); return Task.CompletedTask; });
-
         Content = new Grid
         {
-            RowDefinitions = new RowDefinitions("Auto,*,Auto,Auto"),
+            RowDefinitions = new RowDefinitions("Auto,*,Auto"),
             Margin = new Thickness(22),
             RowSpacing = 12,
             Children =
@@ -94,8 +94,7 @@ internal sealed class SettingsWindow : Window
                     },
                 }, 0),
                 At(tabs, 1),
-                At(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { save, diagnostics, startup, close } }, 2),
-                At(_status, 3),
+                At(_status, 2),
             },
         };
     }
@@ -134,6 +133,14 @@ internal sealed class SettingsWindow : Window
             _role.SelectedIndex = 1;
             SetStatus("Join code applied. Save, and this computer will appear on the desk.");
         });
+        var pair = Action("Find and pair device", () =>
+        {
+            var onboarding = new OnboardingWindow(_configPath, _restartAfterSave, () => { });
+            onboarding.Show();
+            onboarding.Activate();
+            return Task.CompletedTask;
+        });
+        var save = Action("Save connection", SaveAsync, accent: true);
 
         return Scroll(new StackPanel
         {
@@ -148,7 +155,9 @@ internal sealed class SettingsWindow : Window
                 Field("Desk name", _deskName),
                 Field("Shared secret", _password, "Generated automatically for a new desk. Use the join code instead of retyping it."),
                 Field("Relay port", _relayPort, "The default works on most home and office LANs."),
-                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { copyCode, pasteCode } },
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { copyCode, pasteCode, save } },
+                Section("Pair a new computer", "A ScreenFuse computer already on a desk can start a new desk instead of joining one — or pair with a second computer from scratch."),
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { pair } },
             },
         });
     }
@@ -164,6 +173,24 @@ internal sealed class SettingsWindow : Window
             _screenLock,
             _hideCursor,
             _accelerateWheel,
+            Section("Startup", "Starts ScreenFuse in the background when you sign in, so the desk is ready without opening anything."),
+            _startOnStartup,
+        },
+    });
+
+    private Control TroubleshootTab() => Scroll(new StackPanel
+    {
+        Spacing = 14,
+        Children =
+        {
+            Section("Force connect all displays", "Wakes every display on this computer and on the connected computers, so monitors that drifted to sleep or lost their signal can re-lock onto the right computer."),
+            new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Action("Force connect all displays", ForceDisplaysAsync) } },
+            Section("Reset cursors", "Restores the cursor on this computer and on every connected computer. Use this when a pointer is stranded and its cursor stays hidden."),
+            new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Action("Reset cursors on all peers", ResetCursorsAsync) } },
+            Section("Diagnostics", "Reports what this computer can read over DDC/CI — which monitors answer, and which input each is showing."),
+            new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Action("Display diagnostics", DiagnosticsAsync) } },
+            Section("Reset App", "Deletes this computer's settings — the desk, the pairing and the learned monitor wiring — so ScreenFuse starts over as if freshly installed. A copy of each file is kept as a .bak next to it."),
+            new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Action("Reset App", ResetAppAsync) } },
         },
     });
 
@@ -191,7 +218,87 @@ internal sealed class SettingsWindow : Window
         _screenLock.IsChecked = first?.ScreenLockPropagation ?? false;
         _hideCursor.IsChecked = first?.HideCursor ?? false;
         _accelerateWheel.IsChecked = first?.AccelerateMouseWheel ?? true;
+        RefreshStartupToggle();
         return warning;
+    }
+
+    // The toggle reflects what the operating system actually has installed, not what this window
+    // assumes — an install can come from anywhere (pairing, the tray menu, the --install flag).
+    private void RefreshStartupToggle()
+    {
+        _startOnStartup.IsChecked = StartupState.IsInstalled();
+        _startOnStartup.IsEnabled = true;
+    }
+
+    private async Task ToggleStartupAsync(bool enable)
+    {
+        _startOnStartup.IsEnabled = false;
+        try
+        {
+            var exe = Environment.ProcessPath ?? throw new InvalidOperationException("Cannot determine executable path.");
+            var start = new ProcessStartInfo(exe, enable ? "--install" : "--uninstall") { UseShellExecute = true };
+            if (OperatingSystem.IsWindows()) start.Verb = "runas";
+            using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the startup installer.");
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromMinutes(2));
+            RefreshStartupToggle();
+            SetStatus(enable ? "ScreenFuse will start when you sign in." : "ScreenFuse will no longer start when you sign in.");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Could not change the startup entry: {ex.Message}");
+            RefreshStartupToggle();
+        }
+    }
+
+    private async Task ForceDisplaysAsync()
+    {
+        if (_desk == null)
+        {
+            SetStatus("ScreenFuse is not running the desk right now — no displays to wake.");
+            return;
+        }
+        try
+        {
+            var result = await _desk.WakeAllDisplaysAsync();
+            SetStatus(result.Message);
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Could not wake the displays: {ex.Message}");
+        }
+    }
+
+    private async Task ResetCursorsAsync()
+    {
+        try
+        {
+            _inputRouter?.ResetCursorState();
+            if (_desk != null)
+                SetStatus((await _desk.ResetCursorsAsync()).Message);
+            else
+                SetStatus("Cursor restored on this computer.");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Could not reset the cursors: {ex.Message}");
+        }
+    }
+
+    private async Task ResetAppAsync()
+    {
+        try
+        {
+            var removed = SettingsReset.Reset(_configPath);
+            SetStatus(removed.Count == 0
+                ? "Nothing to reset — no settings found. Restarting anyway…"
+                : $"Reset {string.Join(", ", removed)} (a copy was kept as .bak). Restarting…");
+            await Task.Delay(400);
+            _restartAfterSave();
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Could not reset the settings: {ex.Message}");
+        }
     }
 
     private async Task SaveAsync()
@@ -321,20 +428,6 @@ internal sealed class SettingsWindow : Window
             SetStatus(string.Join(Environment.NewLine, report.Select(r => $"{(r.Success ? "✓" : "✗")} {r.Command}: {r.Detail}")));
         }
         catch (Exception ex) { SetStatus($"Display diagnostics failed: {ex.Message}"); }
-    }
-
-    private Task InstallStartupAsync()
-    {
-        try
-        {
-            var exe = Environment.ProcessPath ?? throw new InvalidOperationException("Cannot determine executable path.");
-            var start = new ProcessStartInfo(exe, "--install") { UseShellExecute = true };
-            if (OperatingSystem.IsWindows()) start.Verb = "runas";
-            _ = Process.Start(start);
-            SetStatus("Startup installation launched.");
-        }
-        catch (Exception ex) { SetStatus($"Could not install startup entry: {ex.Message}"); }
-        return Task.CompletedTask;
     }
 
     private void UpdateRoleState() => _relayPort.IsEnabled = _role.SelectedIndex != 1;

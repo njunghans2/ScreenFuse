@@ -38,6 +38,32 @@ public class DeskMergeTests
     }
 
     [Test]
+    public void ADeadInputIsNotLearnedWhenTheComputerNeverActuallyShowsThePanel()
+    {
+        // The monitor sits on a socket nothing drives — the desk once sent it there — but it
+        // still answers DDC. The computer reading it must not adopt that code as its own: the
+        // next switch would send the panel back to the same black socket. Only a code with the
+        // screen as evidence is learned.
+        var reports = new Dictionary<string, DeskInventoryMessage>
+        {
+            ["mac"] = Inventory(
+                [("1", "BenQ XL2420T", 1)],
+                []),
+        };
+
+        var merged = DeskMerge.Merge([], reports);
+
+        var monitor = merged.Monitors.Single();
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(monitor.Source("mac")!.Input, Is.Null,
+                "a code read without the screen being present is a dead socket, not a learned input");
+            Assert.That(merged.Views.Single().ActiveHost, Is.EqualTo("mac"),
+                "the computer that can read the panel still counts as the one on it");
+        }
+    }
+
+    [Test]
     public void TheSamePhysicalMonitorSeenFromTwoComputersStaysOneMonitor()
     {
         // The PC learned input 15 earlier. Now the monitor shows the Mac, so only the Mac can see it.

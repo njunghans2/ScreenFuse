@@ -18,6 +18,17 @@ public sealed class FakePlatform : IPlatformInput, ICursorHider
     public int WarpX { get; private set; }
     public int WarpY { get; private set; }
 
+    // The desktop the cursor actually lives on. A real SetCursorPos cannot put the cursor outside
+    // it: ask for a point on a monitor that is no longer there and the cursor lands on the edge of
+    // one that is. That clamp is the whole reason a stale park point breaks the mouse, so the fake
+    // has to do it too or the bug is invisible here.
+    private (int X, int Y, int Width, int Height) _desktop = (0, 0, 2560, 1440);
+    public (int X, int Y, int Width, int Height) Desktop
+    {
+        get => _desktop;
+        set { _desktop = value; WarpCursor(WarpX, WarpY); }
+    }
+
     // set to InputRouter.FlushAsync to synchronize channel consumer after each Fire call
     public Func<Task>? AfterFireCallback { get; set; }
 
@@ -34,8 +45,7 @@ public sealed class FakePlatform : IPlatformInput, ICursorHider
         IsOnVirtualScreen = false;
         HideCursorCalled = false;
         ShowCursorCalled = false;
-        WarpX = 2560 / 2;
-        WarpY = 1440 / 2;
+        WarpCursor(Desktop.X + Desktop.Width / 2, Desktop.Y + Desktop.Height / 2);
     }
 
     public static List<DetectedScreen> GetAllScreens() => [new DetectedScreen(0, 0, 2560, 1440, null, null, null)];
@@ -54,15 +64,18 @@ public sealed class FakePlatform : IPlatformInput, ICursorHider
         _onKeyEvent = onKeyEvent;
         _onMouseButton = onMouseButton;
         _onMouseScroll = onMouseScroll;
-        WarpX = 2560 / 2;
-        WarpY = 1440 / 2;
+        WarpCursor(Desktop.X + Desktop.Width / 2, Desktop.Y + Desktop.Height / 2);
         return Task.CompletedTask;
     }
 
     public bool AnyMouseButtonHeld { get; set; }
     bool IPlatformInput.AnyMouseButtonHeld() => AnyMouseButtonHeld;
     public void StopEventTap() { }
-    public void WarpCursor(int x, int y) { WarpX = x; WarpY = y; }
+    public void WarpCursor(int x, int y)
+    {
+        WarpX = Math.Clamp(x, Desktop.X, Desktop.X + Desktop.Width - 1);
+        WarpY = Math.Clamp(y, Desktop.Y, Desktop.Y + Desktop.Height - 1);
+    }
     // ICursorHider — what InputRouter calls
     void ICursorHider.Hide() { HideCursorCalled = true; }
     void ICursorHider.Show() { ShowCursorCalled = true; }

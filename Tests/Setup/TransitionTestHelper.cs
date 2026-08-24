@@ -43,21 +43,24 @@ public static class TransitionTestHelper
         var service = new InputRouter(platform, platform, TestConfig, relay, screens, NullLoggerFactory.Instance, NullLogger<InputRouter>.Instance, new NullScreenSaverSync(), new NullClipboardSync(),
             FileTransferService.Null(), new NullFileSelectionDetector(), new NullOsdNotification(), tracker, getTickCount: getTickCount);
         platform.AfterFireCallback = service.FlushAsync;
-        return new TestServiceBundle(platform, relay, service);
+        relay.AfterFireCallback = service.FlushAsync;
+        return new TestServiceBundle(platform, relay, service) { Screens = screens };
     }
 
     // Same as CreateService, but with a profile the test holds on to, so it can rearrange the desk
-    // mid-test the way DeskService does at runtime.
-    public static TestServiceBundle CreateServiceWith(IHydraProfile profile)
+    // mid-test the way DeskService does at runtime. The screen detector comes back too, so a test
+    // can also take a monitor away, which is the other half of what a desk switch does.
+    public static TestServiceBundle CreateServiceWith(IHydraProfile profile, FakeScreenDetector? screenDetector = null)
     {
         var platform = new FakePlatform();
         var relay = new FakeRelay();
-        var screens = new FakeScreenDetector();
+        var screens = screenDetector ?? new FakeScreenDetector();
         var tracker = new ActivityTracker(profile, new Lazy<IRelaySender>(() => relay), new WorldState(), new NullScreenSaverSync(), NullLogger<ActivityTracker>.Instance);
         var service = new InputRouter(platform, platform, profile, relay, screens, NullLoggerFactory.Instance, NullLogger<InputRouter>.Instance, new NullScreenSaverSync(), new NullClipboardSync(),
             FileTransferService.Null(), new NullFileSelectionDetector(), new NullOsdNotification(), tracker);
         platform.AfterFireCallback = service.FlushAsync;
-        return new TestServiceBundle(platform, relay, service);
+        relay.AfterFireCallback = service.FlushAsync;
+        return new TestServiceBundle(platform, relay, service) { Screens = screens };
     }
 
     public static async Task BringRemoteOnline(FakeRelay relay)
@@ -85,7 +88,8 @@ public static class TransitionTestHelper
         var service = new InputRouter(platform, platform, profile, relay, screens, NullLoggerFactory.Instance, NullLogger<InputRouter>.Instance, new NullScreenSaverSync(), new NullClipboardSync(),
             FileTransferService.Null(), new NullFileSelectionDetector(), new NullOsdNotification(), tracker);
         platform.AfterFireCallback = service.FlushAsync;
-        return new TestServiceBundle(platform, relay, service);
+        relay.AfterFireCallback = service.FlushAsync;
+        return new TestServiceBundle(platform, relay, service) { Screens = screens };
     }
 
     public static async Task BringHostOnline(FakeRelay relay, string host, string screenName = "screen:0") =>
@@ -111,4 +115,7 @@ public static class TransitionTestHelper
         NullLogger<ActivityTracker>.Instance);
 }
 
-public record TestServiceBundle(FakePlatform Platform, FakeRelay Relay, InputRouter Service);
+public record TestServiceBundle(FakePlatform Platform, FakeRelay Relay, InputRouter Service)
+{
+    public FakeScreenDetector Screens { get; init; } = new();
+}

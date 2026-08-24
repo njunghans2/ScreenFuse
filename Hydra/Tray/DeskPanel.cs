@@ -17,14 +17,15 @@ internal sealed class DeskPanel : UserControl
     private readonly Action<string> _status;
 
     private readonly DeskCanvas _canvas;
+    private readonly StackPanel _sharing = new() { Spacing = 6 };
     private readonly ComboBox _controller = SettingsWindow.NoWheel(new ComboBox { MinWidth = 190 });
     private readonly ComboBox _profiles = SettingsWindow.NoWheel(new ComboBox { MinWidth = 190 });
     private readonly TextBox _newProfile = new() { PlaceholderText = "Name this setup", MinWidth = 190 };
     private readonly TextBlock _peers = new() { Opacity = 0.72, TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _role = new() { Opacity = 0.72, TextWrapping = TextWrapping.Wrap };
-    private readonly StackPanel _wiring = new() { Spacing = 10 };
 
     private bool _suppress;
+    private bool _sharingSuppress;
 
     internal DeskPanel(IDeskService desk, Action<string> status)
     {
@@ -88,6 +89,20 @@ internal sealed class DeskPanel : UserControl
                     },
                     _role,
                     _canvas,
+                    new StackPanel
+                    {
+                        Spacing = 2,
+                        Children =
+                        {
+                            new TextBlock { Text = "Mouse sharing per monitor", FontWeight = FontWeight.SemiBold },
+                            new TextBlock
+                            {
+                                Text = "Turn off to keep the pointer from leaving or entering this monitor. The monitor keeps showing whichever computer drives it.",
+                                Opacity = 0.72, TextWrapping = TextWrapping.Wrap,
+                            },
+                            _sharing,
+                        },
+                    },
                     _peers,
                     Header("Saved setups", "Keep the desk as it stands right now — which computer is on each monitor, and which one has the keyboard — under a name you can switch back to from the tray."),
                     new StackPanel
@@ -101,24 +116,6 @@ internal sealed class DeskPanel : UserControl
                         Orientation = Orientation.Horizontal,
                         Spacing = 8,
                         Children = { _profiles, activate, delete },
-                    },
-                    new Expander
-                    {
-                        Header = "How each computer is wired",
-                        Content = new StackPanel
-                        {
-                            Spacing = 10,
-                            Children =
-                            {
-                                new TextBlock
-                                {
-                                    Text = "ScreenFuse learns these on its own: a computer that can read a monitor is looking at its own input, so it records the code. Fill one in by hand only when a computer has never been on that monitor while ScreenFuse was running. Try switches the monitor over so you can see which cable the code selects.",
-                                    Opacity = 0.72,
-                                    TextWrapping = TextWrapping.Wrap,
-                                },
-                                _wiring,
-                            },
-                        },
                     },
                 },
             },
@@ -142,6 +139,31 @@ internal sealed class DeskPanel : UserControl
 
         _canvas.Update(snapshot.Monitors, snapshot.Hosts);
 
+        _sharingSuppress = true;
+        try
+        {
+            _sharing.Children.Clear();
+            foreach (var monitor in snapshot.Monitors)
+            {
+                var toggle = new CheckBox
+                {
+                    Content = monitor.Sleeping
+                        ? $"{monitor.Label} — sleeping (its display is blanked; it wakes when any monitor switches back)"
+                        : monitor.Label,
+                    IsChecked = monitor.CrossingEnabled,
+                    IsEnabled = !monitor.Sleeping,
+                    Tag = monitor.Id,
+                };
+                toggle.IsCheckedChanged += async (sender, _) =>
+                {
+                    if (_sharingSuppress || sender is not CheckBox box || box.Tag is not string id) return;
+                    Report(await _desk.SetCrossingEnabledAsync(id, box.IsChecked == true));
+                };
+                _sharing.Children.Add(toggle);
+            }
+        }
+        finally { _sharingSuppress = false; }
+
         var others = snapshot.Hosts.Where(h => !string.Equals(h, snapshot.LocalHost, StringComparison.OrdinalIgnoreCase)).ToList();
         var connected = snapshot.ConnectedHosts.Count;
         _peers.Text = others.Count == 0
@@ -154,92 +176,6 @@ internal sealed class DeskPanel : UserControl
             ? $"This computer ({snapshot.LocalHost}) has the keyboard and mouse."
             : $"{snapshot.Controller} has the keyboard and mouse. Changes made here are carried out by {snapshot.Controller}.";
 
-        BuildWiring(snapshot);
-    }
-
-    private void BuildWiring(DeskSnapshot snapshot)
-    {
-        _wiring.Children.Clear();
-        foreach (var monitor in snapshot.Monitors)
-        {
-            var rows = new StackPanel { Spacing = 6 };
-            // The monitor itself reports which codes VCP 0x60 accepts, so offer those by name rather
-            // than asking anyone to know that 17 means HDMI 1. Fall back to a number box only for
-            // monitors that would not say.
-            var offered = monitor.Sources
-                .SelectMany(s => s.AvailableInputs ?? [])
-                .Concat(monitor.Sources.Where(s => s.Input != null).Select(s => s.Input!.Value))
-                .Distinct()
-                .OrderBy(v => v)
-                .ToList();
-
-            foreach (var host in snapshot.Hosts)
-            {
-                var source = monitor.Source(host);
-                Control input;
-                Func<int?> read;
-                if (offered.Count > 0)
-                {
-                    var combo = SettingsWindow.NoWheel(new ComboBox
-                    {
-                        ItemsSource = offered.Select(InputName).ToList(),
-                        MinWidth = 150,
-                        SelectedIndex = source?.Input is { } known ? offered.IndexOf(known) : -1,
-                    });
-                    input = combo;
-                    read = () => combo.SelectedIndex >= 0 ? offered[combo.SelectedIndex] : null;
-                }
-                else
-                {
-                    var number = SettingsWindow.NoWheel(new NumericUpDown { Minimum = 0, Maximum = 255, Increment = 1, Value = source?.Input, MinWidth = 150 });
-                    input = number;
-                    read = () => number.Value is { } v ? decimal.ToInt32(v) : null;
-                }
-
-                var test = SettingsWindow.Action("Try", async () =>
-                {
-                    if (read() is not { } value) { _status("Pick an input first."); return; }
-                    Report(await _desk.ProbeInputAsync(monitor.Id, host, value));
-                });
-                rows.Children.Add(new Grid
-                {
-                    ColumnDefinitions = new ColumnDefinitions("2*,Auto,Auto,*"),
-                    ColumnSpacing = 8,
-                    Children =
-                    {
-                        Col(new TextBlock { Text = host, VerticalAlignment = VerticalAlignment.Center }, 0),
-                        Col(input, 1),
-                        Col(test, 2),
-                        Col(new TextBlock
-                        {
-                            Text = source?.Reachable == true ? "on this monitor now" : source?.Input == null ? "not known yet" : "",
-                            Opacity = 0.6,
-                            VerticalAlignment = VerticalAlignment.Center,
-                        }, 3),
-                    },
-                });
-            }
-
-            _wiring.Children.Add(new Border
-            {
-                BorderBrush = Brushes.DimGray,
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(8),
-                Padding = new Thickness(12),
-                Child = new StackPanel
-                {
-                    Spacing = 8,
-                    Children =
-                    {
-                        new TextBlock { Text = monitor.Label, FontWeight = FontWeight.SemiBold },
-                        rows,
-                    },
-                },
-            });
-        }
-
-        if (_wiring.Children.Count == 0)
-            _wiring.Children.Add(new TextBlock { Text = "No monitors have been discovered yet.", Opacity = 0.6 });
     }
 
     private async Task SetMonitorHostAsync(string monitorId, string host) =>
@@ -249,25 +185,6 @@ internal sealed class DeskPanel : UserControl
         Report(await _desk.SaveArrangementAsync(placements));
 
     private void Report(DeskActionResult result) => _status(result.Message);
-
-    // MCCS assigns these meanings to VCP 0x60; the code is kept in the label because a monitor's
-    // idea of "HDMI 1" and the socket printed on its back do not always agree.
-    private static string InputName(int code) => code switch
-    {
-        1 => "VGA 1 (1)",
-        2 => "VGA 2 (2)",
-        3 => "DVI 1 (3)",
-        4 => "DVI 2 (4)",
-        5 => "Composite 1 (5)",
-        7 => "S-Video 1 (7)",
-        9 => "Component 1 (9)",
-        15 => "DisplayPort 1 (15)",
-        16 => "DisplayPort 2 (16)",
-        17 => "HDMI 1 (17)",
-        18 => "HDMI 2 (18)",
-        27 => "USB-C (27)",
-        _ => $"Input {code}",
-    };
 
     private static StackPanel Header(string title, string description) => new()
     {
@@ -279,5 +196,4 @@ internal sealed class DeskPanel : UserControl
         },
     };
 
-    private static T Col<T>(T control, int column) where T : Control { Grid.SetColumn(control, column); return control; }
 }

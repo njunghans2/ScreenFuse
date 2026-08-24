@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Cathedral.Config;
 using Cathedral.Extensions;
 using Hydra.Keyboard;
@@ -20,44 +20,53 @@ public enum MessageKind : byte
     SlaveLog = 9,
     MouseMoveDelta = 10,
     ScreensaverSync = 11,
-    ClipboardPush = 12,         // master → slave: apply this clipboard (text/image/files)
-    ClipboardPull = 13,         // master → slave: send me your clipboard
-    ClipboardPullResponse = 14, // slave → master: here's my clipboard
-    // 15, 16 reserved (formerly used; do not reuse — breaks wire compat with older clients)
-    FileTransferRequest = 17,   // master → receiver: can you receive? (SourceHost = actual data sender if different)
-    FileTransferStart = 26,     // data source → receiver: here's what's coming (FileNames + TotalBytes)
-    FileTransferChunk = 18,     // data source → receiver: chunk of tar.gz data
-    FileTransferDone = 19,      // data source → receiver: all data sent
-    FileTransferAbort = 20,     // either → either: abort and clean up
-    FileTransferAccepted = 25,  // receiver → master: destination validated, ready to receive
-    FileSelectionQuery = 21,    // master → slave: what files are selected?
-    FileSelectionResponse = 22, // slave → master: here are the selected files
-    FileStreamRequest = 23,     // master → source slave: stream these files to target
-    Osd = 24,                   // master → slave: display an on-screen notification
-    FileTransferBusy = 27,      // slave → master: transfer already in progress, request refused
-    ClipboardHash = 28,         // master → slave: here's my clipboard hash (on screen enter)
-    ClipboardPullRequest = 29,  // slave → master: my hash differs, please push your clipboard
-    LockScreen = 30,            // master → slave: lock the screen
+    ClipboardPush = 12,         // master â†’ slave: apply this clipboard (text/image/files)
+    ClipboardPull = 13,         // master â†’ slave: send me your clipboard
+    ClipboardPullResponse = 14, // slave â†’ master: here's my clipboard
+    // 15, 16 reserved (formerly used; do not reuse â€” breaks wire compat with older clients)
+    FileTransferRequest = 17,   // master â†’ receiver: can you receive? (SourceHost = actual data sender if different)
+    FileTransferStart = 26,     // data source â†’ receiver: here's what's coming (FileNames + TotalBytes)
+    FileTransferChunk = 18,     // data source â†’ receiver: chunk of tar.gz data
+    FileTransferDone = 19,      // data source â†’ receiver: all data sent
+    FileTransferAbort = 20,     // either â†’ either: abort and clean up
+    FileTransferAccepted = 25,  // receiver â†’ master: destination validated, ready to receive
+    FileSelectionQuery = 21,    // master â†’ slave: what files are selected?
+    FileSelectionResponse = 22, // slave â†’ master: here are the selected files
+    FileStreamRequest = 23,     // master â†’ source slave: stream these files to target
+    Osd = 24,                   // master â†’ slave: display an on-screen notification
+    FileTransferBusy = 27,      // slave â†’ master: transfer already in progress, request refused
+    ClipboardHash = 28,         // master â†’ slave: here's my clipboard hash (on screen enter)
+    ClipboardPullRequest = 29,  // slave â†’ master: my hash differs, please push your clipboard
+    LockScreen = 30,            // master â†’ slave: lock the screen
     ActivityPing = 31,          // either direction: poke idle timer; master re-broadcasts to other slaves if syncScreensaver
-    SceneActivate = 32,         // master → all agents: apply display routing and restart into named profile
-    DeskInventory = 33,         // any → controller: my screens and the monitors I can reach over DDC
-    DeskSetInput = 34,          // controller → peer: switch this monitor's input (only the peer that
+    SceneActivate = 32,         // master â†’ all agents: apply display routing and restart into named profile
+    DeskInventory = 33,         // any â†’ controller: my screens and the monitors I can reach over DDC
+    DeskSetInput = 34,          // controller â†’ peer: switch this monitor's input (only the peer that
                                 //   currently drives a monitor can command it, so switching is delegated)
-    DeskSetInputResult = 35,    // peer → controller: how the delegated switch went
-    DeskState = 36,             // controller → all: the merged desk, so every settings window shows the same picture
-    DeskCommand = 37,           // any → controller: a desk action requested from another computer's settings window
-    DeskConfigPush = 38,        // controller → all: the shared desk document (arrangement, monitors, scenes)
-    DeskDisplayPower = 39,      // controller → peer: stop or resume your video output, so a monitor's
+    DeskSetInputResult = 35,    // peer â†’ controller: how the delegated switch went
+    DeskState = 36,             // controller â†’ all: the merged desk, so every settings window shows the same picture
+    DeskCommand = 37,           // any â†’ controller: a desk action requested from another computer's settings window
+    DeskConfigPush = 38,        // controller â†’ all: the shared desk document (arrangement, monitors, scenes)
+    DeskDisplayPower = 39,      // controller â†’ peer: stop or resume your video output, so a monitor's
                                 //   automatic input detection follows the signal (no DDC required)
-    DeskConfigRequest = 40,     // follower → controller: my desk document differs from yours, send it
+    DeskConfigRequest = 40,     // follower â†’ controller: my desk document differs from yours, send it
+    DeskInventoryRequest = 41,  // controller â†’ peer: refresh and return its current display inventory
+    CursorPosition = 42,        // slave â†’ master: where the slave's pointer actually is, so the master
+                                //   can reconcile its virtual pointer with reality (a pointer the user
+                                //   moved locally would otherwise strand the crossing)
+    CursorReset = 43,           // controller â†’ peers: restore every computer's cursor (troubleshooting)
+    SetMonitorDisplay = 44,     // controller â†’ peer: remove/restore the peer's display for one monitor
+                                //   (the monitor switched to another computer â€” the peer must stop
+                                //   using the display until it is switched back)
+    SetMonitorStandby = 45,     // controller â†’ peer: blank or wake one panel without touching the desktop topology
 }
 
 public record MouseMoveMessage(string Screen, int X, int Y);
 public record MouseMoveDeltaMessage(int Dx, int Dy);
 // Output/DisplayName/PlatformId travel with the geometry so the computer holding the keyboard can
 // recognise a remote screen by the names its owner uses for it. Without them a remote screen has
-// only its position and an index-based name, and a crossing that names any other identifier — which
-// is the only kind that survives a display being plugged in or removed — matches nothing at all and
+// only its position and an index-based name, and a crossing that names any other identifier â€” which
+// is the only kind that survives a display being plugged in or removed â€” matches nothing at all and
 // is quietly dropped.
 public record ScreenInfoEntry(
     string Name, int X, int Y, int Width, int Height, decimal MouseScale, decimal? RelativeMouseScale = null,
@@ -114,21 +123,27 @@ public record DeskScreenReport(
 public record DeskInventoryMessage(List<DeskMonitorReport> Monitors, List<DeskScreenReport> Screens);
 public record DeskSetInputMessage(string RequestId, string DdcId, int Input);
 public record DeskDisplayPowerMessage(string RequestId, bool Wake);
+public record DeskInventoryRequestMessage;
 public record DeskConfigRequestMessage;
+public record CursorPositionMessage(string Screen, int X, int Y);
+public record CursorResetMessage;
+public record SetMonitorDisplayMessage(string LocalSourceId, bool Enabled);
+public record SetMonitorStandbyMessage(string LocalSourceId, bool Standby);
 public record DeskSetInputResultMessage(string RequestId, bool Success, string? Detail);
 public record DeskStateMonitor(
     string Id, string Label, int DeskX, int DeskY, int Width, int Height,
-    string? ActiveHost, List<DeskStateSource> Sources);
+    string? ActiveHost, List<DeskStateSource> Sources, bool CrossingEnabled = true, bool Sleeping = false);
 public record DeskStateSource(string Host, int? Input, bool Reachable, List<int>? AvailableInputs = null);
 public record DeskStateMessage(
     string? Fingerprint,
     string Controller, List<string> Hosts, List<string> ConnectedHosts,
-    List<DeskStateMonitor> Monitors, List<string> Scenes, string? CurrentScene);
-public enum DeskCommandKind : byte { SetMonitorHost = 1, SetController = 2, SaveScene = 3, ActivateScene = 4, ProbeInput = 5, SaveArrangement = 6, DeleteScene = 7 }
+    List<DeskStateMonitor> Monitors, List<string> Scenes, string? CurrentScene,
+    string? ControllerOverride = null);
+public enum DeskCommandKind : byte { SetMonitorHost = 1, SetController = 2, SaveScene = 3, ActivateScene = 4, SaveArrangement = 6, DeleteScene = 7, SetCrossingEnabled = 8 }
 public record DeskArrangementEntry(string Monitor, int DeskX, int DeskY, int Width, int Height, string? Label);
 public record DeskCommandMessage(
     DeskCommandKind Kind, string? Monitor = null, string? Host = null, string? Scene = null,
-    int? Input = null, List<DeskArrangementEntry>? Arrangement = null);
+    int? Input = null, List<DeskArrangementEntry>? Arrangement = null, bool CrossingEnabled = true);
 public record DeskConfigPushMessage(string Json);
 
 public static class MessageSerializer
@@ -153,7 +168,7 @@ public static class MessageSerializer
 
 public record DecodedMessage(MessageKind Kind, ReadOnlyMemory<byte> Bytes)
 {
-    // lazy string conversion — only used in tests and low-frequency paths
+    // lazy string conversion â€” only used in tests and low-frequency paths
     public string Json => Encoding.UTF8.GetString(Bytes.Span);
     public T Deserialize<T>() => Bytes.FromSaneJson<T>()!;
 }
