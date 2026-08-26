@@ -11,6 +11,9 @@ internal sealed class WindowsShieldWindow
     private const string ShieldClassName = "HydraShield";
     private nint _hwnd;
     private nint _savedForeground;
+    // Whether the shield is currently up. Show/Hide arrive as posted messages, and nothing
+    // upstream promises they alternate — see the comment in Show().
+    private bool _shown;
     private WndProc? _wndProc; // prevent GC while window exists
     private nint _debugBrush;
     private bool _debugShield;
@@ -72,9 +75,21 @@ internal sealed class WindowsShieldWindow
     {
         if (_hwnd == nint.Zero) return;
 
+        // Showing twice used to cost the user their focus.
+        //
+        // Show takes the foreground and remembers what had it, so Hide can give it back. Called a
+        // second time while the shield was already up, it remembered the shield itself — and Hide
+        // then handed the foreground to a window it had just hidden, so the keyboard went nowhere
+        // and whatever the user was typing into quietly stopped receiving it. Nothing upstream
+        // promises Show and Hide alternate: they are posted to the pump from cursor hide/show,
+        // and a desktop switch re-shows the shield on its own.
+        if (_shown) return;
+
         // don't show while a fullscreen app (e.g. a game) is active — avoid anti-cheat detection
-        _savedForeground = NativeMethods.GetForegroundWindow();
-        if (IsFullscreenAppActive(_savedForeground)) return;
+        var foreground = NativeMethods.GetForegroundWindow();
+        if (IsFullscreenAppActive(foreground)) return;
+        _savedForeground = foreground == _hwnd ? nint.Zero : foreground;
+        _shown = true;
 
         // match mac shield: centered on main screen, 20% of screen dimensions
         var sw = NativeMethods.GetSystemMetrics(NativeMethods.SM_CXSCREEN);
@@ -106,18 +121,22 @@ internal sealed class WindowsShieldWindow
         if (_hwnd == nint.Zero) return;
 
         _cursor.Show();
+        _shown = false;
 
         NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_HIDE);
         NativeMethods.SetWindowPos(_hwnd, NativeMethods.HWND_BOTTOM, 0, 0, 0, 0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_HIDEWINDOW);
 
-        if (_savedForeground != nint.Zero)
+        // Never hand the foreground back to the shield: that is a hidden window, so the focus
+        // would land nowhere at all rather than back where the user left it.
+        if (_savedForeground != nint.Zero && _savedForeground != _hwnd)
             NativeMethods.SetForegroundWindow(_savedForeground);
         _savedForeground = nint.Zero;
     }
 
     internal void Destroy()
     {
+        _shown = false;
         _cursor.Dispose();
         if (_hwnd != nint.Zero) { NativeMethods.DestroyWindow(_hwnd); _hwnd = nint.Zero; }
         if (_debugBrush != nint.Zero) { NativeMethods.DeleteObject(_debugBrush); _debugBrush = nint.Zero; }
