@@ -132,18 +132,18 @@ public record SetMonitorStandbyMessage(string LocalSourceId, bool Standby);
 public record DeskSetInputResultMessage(string RequestId, bool Success, string? Detail);
 public record DeskStateMonitor(
     string Id, string Label, int DeskX, int DeskY, int Width, int Height,
-    string? ActiveHost, List<DeskStateSource> Sources, bool CrossingEnabled = true, bool Sleeping = false);
+    string? ActiveHost, List<DeskStateSource> Sources, bool Sleeping = false);
 public record DeskStateSource(string Host, int? Input, bool Reachable, List<int>? AvailableInputs = null);
 public record DeskStateMessage(
     string? Fingerprint,
     string Controller, List<string> Hosts, List<string> ConnectedHosts,
     List<DeskStateMonitor> Monitors, List<string> Scenes, string? CurrentScene,
     string? ControllerOverride = null);
-public enum DeskCommandKind : byte { SetMonitorHost = 1, SetController = 2, SaveScene = 3, ActivateScene = 4, SaveArrangement = 6, DeleteScene = 7, SetCrossingEnabled = 8 }
+public enum DeskCommandKind : byte { SetMonitorHost = 1, SetController = 2, SaveScene = 3, ActivateScene = 4, SaveArrangement = 6, DeleteScene = 7 }
 public record DeskArrangementEntry(string Monitor, int DeskX, int DeskY, int Width, int Height, string? Label);
 public record DeskCommandMessage(
     DeskCommandKind Kind, string? Monitor = null, string? Host = null, string? Scene = null,
-    int? Input = null, List<DeskArrangementEntry>? Arrangement = null, bool CrossingEnabled = true);
+    int? Input = null, List<DeskArrangementEntry>? Arrangement = null);
 public record DeskConfigPushMessage(string Json);
 
 public static class MessageSerializer

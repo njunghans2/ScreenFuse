@@ -137,7 +137,6 @@ public static class DeskMerge
                 .OrderBy(s => s.Host, StringComparer.OrdinalIgnoreCase)
                 .Select(s => new DeskSourceView(s.Host, s.Input, Same(active.GetValueOrDefault(w.Id), s.Host), s.AvailableInputs))
                 .ToList(),
-            w.CrossingEnabled,
             w.Sleeping))
             .OrderBy(v => v.DeskX).ThenBy(v => v.DeskY)
             .ToList();
@@ -585,7 +584,6 @@ public static class DeskMerge
         public bool Placed { get; set; }
         public int ScreenX { get; set; }
         public int ScreenY { get; set; }
-        public bool CrossingEnabled { get; set; } = true;
         public bool Sleeping { get; set; }
         public List<Source> Sources { get; } = [];
 
@@ -600,7 +598,6 @@ public static class DeskMerge
                 Width = config.Width,
                 Height = config.Height,
                 Placed = config.Width > 0,
-                CrossingEnabled = config.CrossingEnabled,
                 Sleeping = config.Sleeping,
             };
             // Older desks stored no aliases; the label is the only name they knew it by.
@@ -687,7 +684,6 @@ public static class DeskMerge
             DeskY = DeskY,
             Width = Width,
             Height = Height,
-            CrossingEnabled = CrossingEnabled,
             Sleeping = Sleeping,
             Sources = Sources.Select(s => new MonitorSourceConfig
             {

@@ -17,7 +17,7 @@ internal sealed class DeskPanel : UserControl
     private readonly Action<string> _status;
 
     private readonly DeskCanvas _canvas;
-    private readonly StackPanel _sharing = new() { Spacing = 6 };
+    private readonly StackPanel _sleeping = new() { Spacing = 6 };
     private readonly ComboBox _controller = SettingsWindow.NoWheel(new ComboBox { MinWidth = 190 });
     private readonly ComboBox _profiles = SettingsWindow.NoWheel(new ComboBox { MinWidth = 190 });
     private readonly TextBox _newProfile = new() { PlaceholderText = "Name this setup", MinWidth = 190 };
@@ -25,7 +25,6 @@ internal sealed class DeskPanel : UserControl
     private readonly TextBlock _role = new() { Opacity = 0.72, TextWrapping = TextWrapping.Wrap };
 
     private bool _suppress;
-    private bool _sharingSuppress;
 
     internal DeskPanel(IDeskService desk, Action<string> status)
     {
@@ -89,20 +88,7 @@ internal sealed class DeskPanel : UserControl
                     },
                     _role,
                     _canvas,
-                    new StackPanel
-                    {
-                        Spacing = 2,
-                        Children =
-                        {
-                            new TextBlock { Text = "Mouse sharing per monitor", FontWeight = FontWeight.SemiBold },
-                            new TextBlock
-                            {
-                                Text = "Turn off to keep the pointer from leaving or entering this monitor. The monitor keeps showing whichever computer drives it.",
-                                Opacity = 0.72, TextWrapping = TextWrapping.Wrap,
-                            },
-                            _sharing,
-                        },
-                    },
+                    _sleeping,
                     _peers,
                     Header("Saved setups", "Keep the desk as it stands right now — which computer is on each monitor, and which one has the keyboard — under a name you can switch back to from the tray."),
                     new StackPanel
@@ -139,30 +125,17 @@ internal sealed class DeskPanel : UserControl
 
         _canvas.Update(snapshot.Monitors, snapshot.Hosts);
 
-        _sharingSuppress = true;
-        try
-        {
-            _sharing.Children.Clear();
-            foreach (var monitor in snapshot.Monitors)
+        // Only the monitors that are asleep get a line. A monitor the pointer cannot reach is
+        // worth saying out loud; every other monitor is already drawn on the desk above, and a
+        // list repeating all of them was only ever there to hang a checkbox off.
+        _sleeping.Children.Clear();
+        foreach (var monitor in snapshot.Monitors.Where(m => m.Sleeping))
+            _sleeping.Children.Add(new TextBlock
             {
-                var toggle = new CheckBox
-                {
-                    Content = monitor.Sleeping
-                        ? $"{monitor.Label} — sleeping (its display is blanked; it wakes when any monitor switches back)"
-                        : monitor.Label,
-                    IsChecked = monitor.CrossingEnabled,
-                    IsEnabled = !monitor.Sleeping,
-                    Tag = monitor.Id,
-                };
-                toggle.IsCheckedChanged += async (sender, _) =>
-                {
-                    if (_sharingSuppress || sender is not CheckBox box || box.Tag is not string id) return;
-                    Report(await _desk.SetCrossingEnabledAsync(id, box.IsChecked == true));
-                };
-                _sharing.Children.Add(toggle);
-            }
-        }
-        finally { _sharingSuppress = false; }
+                Text = $"{monitor.Label} — asleep. Its display is blanked, so the pointer cannot cross onto it; it wakes when any monitor switches back.",
+                Opacity = 0.72,
+                TextWrapping = TextWrapping.Wrap,
+            });
 
         var others = snapshot.Hosts.Where(h => !string.Equals(h, snapshot.LocalHost, StringComparison.OrdinalIgnoreCase)).ToList();
         var connected = snapshot.ConnectedHosts.Count;

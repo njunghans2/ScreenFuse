@@ -374,7 +374,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             _snapshot.Monitors.Select(m => new DeskStateMonitor(
                 m.Id, m.Label, m.DeskX, m.DeskY, m.Width, m.Height, m.ActiveHost,
                 m.Sources.Select(s => new DeskStateSource(s.Host, s.Input, s.Reachable)).ToList(),
-                m.CrossingEnabled, m.Sleeping)).ToList(),
+                m.Sleeping)).ToList(),
             _snapshot.Scenes.ToList(),
             _snapshot.CurrentScene,
             _controllerStore.Read());
@@ -490,15 +490,6 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             ? SaveArrangementCoreAsync(placements)
             : Task.FromResult(Forward(new DeskCommandMessage(DeskCommandKind.SaveArrangement,
                 Arrangement: placements.Select(p => new DeskArrangementEntry(p.Monitor, p.DeskX, p.DeskY, p.Width, p.Height, p.Label)).ToList())));
-
-    // Turn the pointer crossing off or on for one monitor. The crossing edges are rebuilt from the
-    // arrangement on the next recompute, so a monitor whose crossing is switched off simply stops
-    // being a way between computers.
-    public Task<DeskActionResult> SetCrossingEnabledAsync(string monitorId, bool enabled, CancellationToken cancellationToken = default) =>
-        IsController
-            ? SetCrossingEnabledCoreAsync(monitorId, enabled)
-            : Task.FromResult(Forward(new DeskCommandMessage(DeskCommandKind.SetCrossingEnabled,
-                Monitor: monitorId, CrossingEnabled: enabled)));
 
     // Troubleshooting: bring every display on the desk back up. Wakes this computer's displays and
     // asks every connected peer to do the same, so a monitor that drifted to sleep or lost its
@@ -617,7 +608,7 @@ var held = true;
             if (_config.Monitors.FirstOrDefault(m => m.Id == monitorId) is { Sleeping: true })
             {
                 _config = WithMonitors(_config, _config.Monitors
-                    .Select(m => m.Id != monitorId ? m : m.With(sleeping: false, crossingEnabled: true))
+                    .Select(m => m.Id != monitorId ? m : m.With(sleeping: false))
                     .ToList());
             }
         }
@@ -658,7 +649,7 @@ var rebuilt = RebuildHosts(_config);
         var current = _snapshot.Monitors.FirstOrDefault(v => v.Id == m.Id);
         return new DeskMonitorView(
             m.Id, m.DisplayName(), m.DeskX, m.DeskY, m.Width, m.Height,
-            current?.ActiveHost, current?.Sources ?? [], m.CrossingEnabled, m.Sleeping);
+            current?.ActiveHost, current?.Sources ?? [], m.Sleeping);
     }
 
     private async Task ApplyTopologyForSwitchAsync(DeskMonitorConfig monitor, string gainingHost, CancellationToken cancel)
@@ -737,7 +728,7 @@ var rebuilt = RebuildHosts(_config);
         try
         {
             var monitors = _config.Monitors
-                .Select(m => m.Id != monitorId ? m : m.With(sleeping: true, crossingEnabled: false))
+                .Select(m => m.Id != monitorId ? m : m.With(sleeping: true))
                 .ToList();
             _config = WithMonitors(_config, monitors);
             _config = RebuildHosts(_config);
@@ -784,7 +775,7 @@ var rebuilt = RebuildHosts(_config);
                 if (slept.Count > 0)
                 {
                     var monitors = _config.Monitors
-                        .Select(m => !slept.Any(s => s.Id == m.Id) ? m : m.With(sleeping: false, crossingEnabled: true))
+                        .Select(m => !slept.Any(s => s.Id == m.Id) ? m : m.With(sleeping: false))
                         .ToList();
                     _config = WithMonitors(_config, monitors);
                     _config = RebuildHosts(_config);
@@ -1043,27 +1034,6 @@ var rebuilt = RebuildHosts(_config);
 
         await RecomputeAsync(CancellationToken.None);
         return DeskActionResult.Ok("Arrangement saved. The crossing edges were rebuilt from it.");
-    }
-
-    private async Task<DeskActionResult> SetCrossingEnabledCoreAsync(string monitorId, bool enabled)
-    {
-        await _gate.WaitAsync();
-        try
-        {
-            var monitors = _config.Monitors
-                .Select(m => m.Id != monitorId ? m : m.With(crossingEnabled: enabled))
-                .ToList();
-            _config = WithMonitors(_config, monitors);
-            _config = RebuildHosts(_config);
-            ApplyLayout();
-            await PersistAsync(push: true);
-        }
-        finally { _gate.Release(); }
-
-        await RecomputeAsync(CancellationToken.None);
-        return DeskActionResult.Ok(enabled
-            ? "Mouse sharing turned on for this monitor."
-            : "Mouse sharing turned off for this monitor.");
     }
 
     private async Task<DeskActionResult> SaveSceneCoreAsync(string name)
@@ -1428,7 +1398,7 @@ var rebuilt = RebuildHosts(_config);
                     state.Monitors.Select(m => new DeskMonitorView(
                         m.Id, m.Label, m.DeskX, m.DeskY, m.Width, m.Height, m.ActiveHost,
                         m.Sources.Select(s => new DeskSourceView(s.Host, s.Input, s.Reachable)).ToList(),
-                        m.CrossingEnabled, m.Sleeping)).ToList(),
+                        m.Sleeping)).ToList(),
                     state.Scenes, state.CurrentScene, IsController: false, Crossings: Crossings());
 
                 // The desk we are shown and the desk we hold are different things: the picture
@@ -1476,7 +1446,6 @@ var rebuilt = RebuildHosts(_config);
             DeskCommandKind.ActivateScene => await ActivateSceneAsync(command.Scene ?? ""),
             DeskCommandKind.SaveArrangement => await SaveArrangementCoreAsync(
                 (command.Arrangement ?? []).Select(a => new DeskPlacement(a.Monitor, a.DeskX, a.DeskY, a.Width, a.Height, a.Label)).ToList()),
-            DeskCommandKind.SetCrossingEnabled => await SetCrossingEnabledCoreAsync(command.Monitor ?? "", command.CrossingEnabled),
             _ => DeskActionResult.Fail($"Unsupported desk command {command.Kind}."),
         };
         if (!result.Accepted) _log.LogWarning("Desk command {Kind} from {Host} refused: {Message}", command.Kind, sourceHost, result.Message);

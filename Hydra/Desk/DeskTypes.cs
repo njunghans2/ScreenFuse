@@ -12,7 +12,6 @@ public record DeskMonitorView(
     int Height,
     string? ActiveHost,
     IReadOnlyList<DeskSourceView> Sources,
-    bool CrossingEnabled = true,
     // Blanked as the last display of a computer: it still shows that computer, but black, and the
     // pointer may not enter it until a switch brings the desk back.
     bool Sleeping = false)
@@ -88,8 +87,4 @@ public interface IDeskService
 
     // Persist the arrangement the user dragged, and rebuild the crossing edges from it.
     Task<DeskActionResult> SaveArrangementAsync(IReadOnlyList<DeskPlacement> placements, CancellationToken cancellationToken = default);
-
-    // Turn the pointer crossing on or off for one monitor. Off, the pointer cannot leave or enter
-    // through it; the monitor keeps showing whatever computer drives it. Defaults to on.
-    Task<DeskActionResult> SetCrossingEnabledAsync(string monitorId, bool enabled, CancellationToken cancellationToken = default);
 }

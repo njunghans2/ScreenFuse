@@ -11,8 +11,7 @@ namespace Hydra.Desk;
 // range, so the pointer comes out where it went in.
 public static class DeskArrangement
 {
-    public record Placed(string MonitorId, string Host, string? ScreenId, int X, int Y, int Width, int Height,
-        bool CrossingEnabled = true)
+    public record Placed(string MonitorId, string Host, string? ScreenId, int X, int Y, int Width, int Height)
     {
         public int Right => X + Width;
         public int Bottom => Y + Height;
@@ -27,8 +26,11 @@ public static class DeskArrangement
         {
             var host = hostFor(monitor.Id);
             if (string.IsNullOrWhiteSpace(host) || monitor.Width <= 0 || monitor.Height <= 0) continue;
+            // A blanked (sleeping) panel must never take the pointer: it is black, so a crossing
+            // onto it strands the cursor on a display nobody can see.
+            if (monitor.Sleeping) continue;
             placed.Add(new Placed(monitor.Id, host!, monitor.Source(host!)?.ScreenId,
-                monitor.DeskX, monitor.DeskY, monitor.Width, monitor.Height, monitor.CrossingEnabled));
+                monitor.DeskX, monitor.DeskY, monitor.Width, monitor.Height));
         }
         return placed;
     }
@@ -73,11 +75,9 @@ public static class DeskArrangement
 
         foreach (var a in placed)
         {
-            if (!a.CrossingEnabled) continue;
             foreach (var b in placed)
             {
                 if (ReferenceEquals(a, b) || a.Host.Equals(b.Host, StringComparison.OrdinalIgnoreCase)) continue;
-                if (!b.CrossingEnabled) continue;
 
                 var (top, bottom) = Overlap(a.Y, a.Bottom, b.Y, b.Bottom);
                 var (left, right) = Overlap(a.X, a.Right, b.X, b.Right);

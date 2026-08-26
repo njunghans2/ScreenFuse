@@ -33,7 +33,6 @@ public class DeskMonitorConfig
     // Whether the pointer may cross onto this monitor from another computer. Turned off, the
     // monitor stays on whichever computer drives it and the pointer cannot leave or enter through
     // it. Defaults to on.
-    public bool CrossingEnabled { get; init; } = true;
 
     // True while this monitor is the blanked (slept) last display of a computer — the desk never
     // removes an OS's final display, it blacks the panel out instead, and the monitor stays in
@@ -51,7 +50,7 @@ public class DeskMonitorConfig
     public DeskMonitorConfig With(
         string? label = null, int? deskX = null, int? deskY = null,
         int? width = null, int? height = null, List<MonitorSourceConfig>? sources = null,
-        bool? crossingEnabled = null, bool? sleeping = null) => new()
+        bool? sleeping = null) => new()
     {
         Id = Id,
         Label = label ?? Label,
@@ -61,7 +60,6 @@ public class DeskMonitorConfig
         Width = width ?? Width,
         Height = height ?? Height,
         Sources = sources ?? Sources,
-        CrossingEnabled = crossingEnabled ?? CrossingEnabled,
         Sleeping = sleeping ?? Sleeping,
     };
 }

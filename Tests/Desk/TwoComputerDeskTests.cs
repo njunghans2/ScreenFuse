@@ -302,7 +302,7 @@ public class TwoComputerDeskTests
                 "the last display is blanked instead of removed");
             var benq = desk.Windows.Snapshot.Monitors.Single(m => m.Id == desk.Benq);
             Assert.That(benq.Sleeping, Is.True, "the desk records that the monitor is the blanked last display");
-            Assert.That(benq.CrossingEnabled, Is.False, "a black panel is not a crossing destination");
+            Assert.That(desk.Windows.Snapshot.Crossings, Is.Empty, "a black panel is not a crossing destination");
         }
     }
 
@@ -319,7 +319,7 @@ public class TwoComputerDeskTests
         using (Assert.EnterMultipleScope())
         {
             Assert.That(benq.Sleeping, Is.False, "the monitor that returns is not blanked anymore");
-            Assert.That(benq.CrossingEnabled, Is.True, "its crossings come back with it");
+            Assert.That(desk.Windows.Snapshot.Crossings, Is.Not.Empty, "its crossings come back with it");
         }
     }
 
