@@ -44,5 +44,9 @@ public interface IDisplayRouter
     // display stays exactly where it is. Used for the last display of an OS, which must never be
     // removed — an OS with nothing to render is a soft-locked OS. On macOS the display-wide sleep
     // is used, since panels there have no per-monitor DDC.
+    //
+    // Only for panels this computer alone drives. The Windows path is DDC, which addresses the
+    // monitor and not the cable, so a monitor another computer is showing goes black for them too —
+    // "stop this computer's output" is SetMonitorDisplayEnabledAsync or SetDisplayPowerAsync.
     Task<DisplayCommandResult> SetDisplayStandbyAsync(string localSourceId, bool standby, CancellationToken cancellationToken = default);
 }

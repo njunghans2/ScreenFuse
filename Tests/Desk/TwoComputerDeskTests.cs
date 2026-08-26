@@ -68,21 +68,91 @@ public class TwoComputerDeskTests
     }
 
     [Test]
-    public async Task ThePeerStopsRestartingOnceTheDeskHasSettled()
+    public async Task ThePeerNeverRestartsToAdoptADesk()
     {
-        // The first desk to arrive legitimately changes this computer's crossings, and that does
-        // need a restart. What must not happen is a second one, and a third, as the controller goes
-        // on learning input codes and nudging monitors.
+        // Adopting an arriving desk used to cost a restart, and the peer then restarted again every
+        // time the controller learned an input code or nudged a monitor. Everything in the document
+        // is applied where it stands now, including who holds the keyboard.
         using var desk = await Desk.ConvergedAsync();
-        var afterFirstSync = desk.Mac.Restarts;
 
         for (var i = 0; i < 8; i++) await desk.PumpAsync();
 
+        Assert.That(desk.Mac.Restarts, Is.Zero,
+            "a peer that restarts every time the desk changes never stays up long enough to be useful");
+    }
+
+    // -- handing the keyboard and mouse over --
+
+    [Test]
+    public async Task HandingOverSwapsTheRolesOnBothComputers()
+    {
+        using var desk = await Desk.ConvergedAsync();
+        Assert.That(desk.Windows.Profile.IsController, Is.True);
+        Assert.That(desk.Mac.Profile.IsController, Is.False);
+
+        var result = await desk.Mac.Service.SetControllerAsync("Mac");
+        await desk.Wire.DrainAsync();
+        await desk.PumpAsync();
+
         using (Assert.EnterMultipleScope())
         {
-            Assert.That(afterFirstSync, Is.LessThanOrEqualTo(1), "one restart to adopt the desk, no more");
-            Assert.That(desk.Mac.Restarts, Is.EqualTo(afterFirstSync),
-                "a peer that restarts every time the desk changes never stays up long enough to be useful");
+            Assert.That(result.Accepted, Is.True);
+            Assert.That(desk.Mac.Profile.IsController, Is.True, "the computer that asked takes control");
+            Assert.That(desk.Windows.Profile.IsController, Is.False, "the one that had it steps down");
+            Assert.That(desk.Mac.Snapshot.Controller, Is.EqualTo("Mac"));
+            Assert.That(desk.Windows.Snapshot.Controller, Is.EqualTo("Mac"));
+        }
+    }
+
+    [Test]
+    public async Task HandingOverRestartsNothing()
+    {
+        // This is the whole point of it. Handing the keyboard over used to restart every agent into
+        // its new role, which dropped the relay, took the tray icon and the settings window with
+        // it, and left the desk blank for several seconds.
+        using var desk = await Desk.ConvergedAsync();
+
+        await desk.Windows.Service.SetControllerAsync("Mac");
+        await desk.Wire.DrainAsync();
+        for (var i = 0; i < 4; i++) await desk.PumpAsync();
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(desk.Windows.Restarts, Is.Zero, "the computer giving up control stays up");
+            Assert.That(desk.Mac.Restarts, Is.Zero, "and so does the one taking it");
+        }
+    }
+
+    [Test]
+    public async Task HandingOverIsRememberedAcrossARestart()
+    {
+        using var desk = await Desk.ConvergedAsync();
+
+        await desk.Windows.Service.SetControllerAsync("Mac");
+        await desk.Wire.DrainAsync();
+        await desk.PumpAsync();
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(new ControllerOverrideStore(desk.Windows.Store.Path).Read(), Is.EqualTo("Mac"),
+                "the computer that gave control up comes back in its new role");
+            Assert.That(new ControllerOverrideStore(desk.Mac.Store.Path).Read(), Is.EqualTo("Mac"),
+                "and so does the one that took it");
+        }
+    }
+
+    [Test]
+    public async Task HandingOverToAComputerThatIsNotOnTheDeskIsRefused()
+    {
+        using var desk = await Desk.ConvergedAsync();
+
+        var result = await desk.Windows.Service.SetControllerAsync("Laptop");
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result.Accepted, Is.False);
+            Assert.That(desk.Windows.Snapshot.Controller, Is.EqualTo("NINOG"), "control stays where it was");
+            Assert.That(desk.Windows.Profile.IsController, Is.True);
         }
     }
 

@@ -481,6 +481,12 @@ public class SlaveRelayConnection : RelayConnection
 
     private async Task HandleMasterConfig(string masterHost, ReadOnlyMemory<byte> body)
     {
+        // The computer holding the keyboard answers to nobody: MasterConfig is how a peer is told
+        // who the controller is, so accepting one here would file the sender as this machine's
+        // master and start shipping it logs. The old master-only connection class dropped these
+        // outright; the check is a reading of the role now, because the role can change.
+        if (_profile.IsController) return;
+
         var config = body.FromSaneJson<MasterConfigMessage>() ?? new MasterConfigMessage(null);
         var before = await _peerState.GetMasters();
         await _peerState.AddMaster(masterHost, config);

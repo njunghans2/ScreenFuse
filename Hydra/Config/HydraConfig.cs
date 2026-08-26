@@ -154,8 +154,13 @@ public class HydraConfig
     // When null the explicit per-machine Mode above is used (legacy configs).
     public string? Controller { get; init; }
 
-    public Mode ResolveMode(string localName) =>
-        Controller is { Length: > 0 } c ? (c.EqualsIgnoreCase(localName) ? Config.Mode.Master : Config.Mode.Slave) : Mode;
+    public Mode ResolveMode(string localName) => ResolveMode(Controller, Mode, localName);
+
+    // The one rule, in one place: a named controller decides the role, and only a profile that
+    // names nobody falls back to its own explicit mode. The live profile resolves the same way off
+    // a controller that can change while the process runs, so it must not be a second copy of this.
+    public static Mode ResolveMode(string? controller, Mode fallback, string localName) =>
+        controller is { Length: > 0 } c ? (c.EqualsIgnoreCase(localName) ? Config.Mode.Master : Config.Mode.Slave) : fallback;
     // master only — ignored in slave mode
     public List<HostConfig> Hosts { get; init; } = [];
     // slave only — scale config is reported to master via ScreenInfoEntry, master applies it when routing to slave screens

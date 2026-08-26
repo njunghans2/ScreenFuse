@@ -14,8 +14,22 @@ public interface IHydraProfile
 
     // active profile settings
     string? ProfileName { get; }
+
+    // Which role this computer plays right now. Handing the keyboard to another computer changes
+    // it while the process runs, so this is a reading, not a startup fact.
     Mode Mode { get; }
+
+    // The computer whose keyboard and mouse drive the desk. Every machine stores the same name and
+    // the one that matches its own is the controller.
     string? Controller { get; }
+    bool IsController { get; }
+
+    // Raised after ApplyController, so everything that behaves differently in each role can change
+    // over where it stands instead of being restarted into the new one.
+    event Action? ControllerChanged;
+
+    // Hand control to another computer, live.
+    void ApplyController(string? host);
     List<DeskMonitorConfig> Monitors { get; }
     List<HostConfig> Hosts { get; }
     List<ScreenDefinition> ScreenDefinitions { get; }
@@ -60,8 +74,25 @@ public class HydraProfile(HydraConfigFile configFile, HydraConfig? activeProfile
     public bool DebugMouse { get; } = configFile.DebugMouse;
 
     public string? ProfileName => _activeProfile?.ProfileName;
-    public Mode Mode => _activeProfile?.ResolveMode(Name) ?? Mode.Slave;
-    public string? Controller => _activeProfile?.Controller;
+
+    // Seeded from the active profile — which Program has already reconciled with the hand-taken
+    // override on disk — and replaced live when control is handed over. A profile naming nobody is
+    // a legacy config and keeps falling back to its own explicit mode.
+    private volatile string? _controller = activeProfile?.Controller;
+    public string? Controller => _controller;
+
+    public Mode Mode => HydraConfig.ResolveMode(_controller, _activeProfile?.Mode ?? Config.Mode.Slave, Name);
+    public bool IsController => Mode == Config.Mode.Master;
+
+    public event Action? ControllerChanged;
+
+    public void ApplyController(string? host)
+    {
+        var next = string.IsNullOrWhiteSpace(host) ? null : host;
+        if (string.Equals(_controller, next, StringComparison.OrdinalIgnoreCase)) return;
+        _controller = next;
+        ControllerChanged?.Invoke();
+    }
     public List<DeskMonitorConfig> Monitors { get; } = configFile.Monitors;
     private volatile List<HostConfig>? _hosts;
 

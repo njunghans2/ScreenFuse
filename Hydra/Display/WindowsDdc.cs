@@ -7,7 +7,10 @@ internal static class WindowsDdc
     private const byte InputSelectVcp = 0x60;
     private const byte DisplayPowerVcp = 0xD6;
     private const uint OnMode = 0x01;
-    private const uint StandbyMode = 0x04;
+    // VCP 0xD6 value 2 is standby. Four is DPM *off*, and MCCS lets a display treat four and five
+    // as write-only: a BenQ told four powers its panel down and stops answering DDC at all, so the
+    // 0x01 meant to bring it back never lands and the only way out is the monitor's power button.
+    private const uint StandbyMode = 0x02;
     private const uint WmSysCommand = 0x0112;
     private const nuint ScMonitorPower = 0xF170;
     private static readonly nint HwndBroadcast = new(0xffff);
@@ -151,6 +154,11 @@ internal static class WindowsDdc
     // Puts one physical panel to sleep (VCP 0xD6 = standby) or wakes it (0xD6 = on). The panel
     // blacks out but the display stays part of the desktop — the one case where removing the
     // display would leave the OS with nothing to render, which is how an OS soft-locks.
+    //
+    // 0xD6 is a command to the *monitor*, and a monitor has one power state no matter how many
+    // computers are wired to it. Never aim this at a monitor another computer is showing: it blacks
+    // out the panel for them too, on a switch that otherwise worked perfectly. For "stop driving
+    // this monitor" there is the desktop topology, and for "stop driving anything" SetAllDisplayPower.
     internal static DisplayCommandResult SetDisplayStandby(string id, bool standby)
     {
         var monitors = Enumerate();

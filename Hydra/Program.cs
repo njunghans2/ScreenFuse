@@ -369,81 +369,86 @@ if (config != null)
     else
         throw new PlatformNotSupportedException($"Unsupported OS: {Environment.OSVersion}");
 
-    if (profile.Mode == Mode.Master)
+    // Both halves of the desk, on every computer.
+    //
+    // The controller needs an event tap and a router; a computer that is following needs an output
+    // handler to inject what it is sent. Registering only the half that matched the role at startup
+    // is what made handing the keyboard over a process restart: the machine taking control had no
+    // router to start, and the one giving it up had no output handler to receive with. Both are
+    // built here, and which one is in charge is a reading taken per call — see
+    // RoleAwarePlatformInput and the gate in InputRouter.
+    if (OperatingSystem.IsMacOS())
     {
-        if (OperatingSystem.IsMacOS())
-            services.AddSingleton<IPlatformInput, MacInputHandler>();
-        else if (OperatingSystem.IsWindows())
-            services.AddSingleton<IPlatformInput, WindowsInputHandler>();
-        else if (linuxConsoleMode)
-        {
-            if (!profile.RemoteOnly)
-            {
-                Console.Error.WriteLine("No display server available (DISPLAY not set). Set remoteOnly: true in hydra.conf for console operation.");
-                return;
-            }
-            services.AddSingleton<IPlatformInput, EvdevInputHandler>();
-        }
-        else if (OperatingSystem.IsLinux())
-            services.AddSingleton<IPlatformInput, XorgInputHandler>();
-        else
-            throw new PlatformNotSupportedException($"Unsupported OS: {Environment.OSVersion}");
-
-        services.AddHostedService<ICursorHider, CursorHiderService>();
-        services.AddHostedService<InputRouter>();
+        services.AddSingleton<MacInputHandler>();
+        services.AddSingleton<ILocalEventTap>(sp => sp.GetRequiredService<MacInputHandler>());
+        services.AddSingleton<MacOutputHandler>();
+        services.AddSingleton<IPlatformOutput>(sp => new CoalescingOutputWrapper(sp.GetRequiredService<MacOutputHandler>()));
+        services.AddSingleton<ICursor>(sp => sp.GetRequiredService<MacOutputHandler>());
+        services.AddSingleton<IPlatformInput>(sp => new RoleAwarePlatformInput(
+            sp.GetRequiredService<IHydraProfile>(),
+            sp.GetRequiredService<MacInputHandler>(),
+            sp.GetRequiredService<ICursor>()));
     }
-    else if (profile.Mode == Mode.Slave)
+    else if (OperatingSystem.IsWindows())
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            services.AddSingleton<MacOutputHandler>();
-            services.AddSingleton<IPlatformOutput>(sp => new CoalescingOutputWrapper(sp.GetRequiredService<MacOutputHandler>()));
-            services.AddSingleton<ICursor>(sp => sp.GetRequiredService<MacOutputHandler>());
-        }
-        else if (OperatingSystem.IsWindows())
-        {
-            services.AddSingleton<WindowsOutputHandler>();
+        services.AddSingleton<WindowsInputHandler>();
+        services.AddSingleton<ILocalEventTap>(sp => sp.GetRequiredService<WindowsInputHandler>());
+        services.AddSingleton<WindowsOutputHandler>();
 #pragma warning disable CA1416
-            services.AddSingleton<IPlatformOutput>(sp =>
-            {
-                var handler = sp.GetRequiredService<WindowsOutputHandler>();
-                handler.Initialize();
-                return new CoalescingOutputWrapper(handler);
-            });
-            services.AddSingleton<ICursor>(sp => sp.GetRequiredService<WindowsOutputHandler>());
-#pragma warning restore CA1416
-        }
-        else if (OperatingSystem.IsLinux())
+        services.AddSingleton<IPlatformOutput>(sp =>
         {
-            services.AddSingleton<XorgOutputHandler>();
-            services.AddSingleton<IPlatformOutput>(sp => new CoalescingOutputWrapper(sp.GetRequiredService<XorgOutputHandler>()));
-            services.AddSingleton<ICursor>(sp => sp.GetRequiredService<XorgOutputHandler>());
-        }
-        else
-            throw new PlatformNotSupportedException($"Unsupported OS: {Environment.OSVersion}");
-
-        services.AddSingleton<IPlatformInput, SlavePlatformInput>();
-
-        // real event tap for local keyboard/mouse activity tracking (events pass through — nothing is consumed)
-        if (OperatingSystem.IsMacOS())
-            services.AddSingleton<ILocalEventTap, MacInputHandler>();
-        else if (OperatingSystem.IsWindows())
-            services.AddSingleton<ILocalEventTap, WindowsInputHandler>();
-        else if (!linuxConsoleMode)
-            services.AddSingleton<ILocalEventTap, XorgInputHandler>();
-        else
-            services.AddSingleton<ILocalEventTap>(sp => sp.GetRequiredService<IPlatformInput>()); // no-op on console
-
-        services.AddHostedService<ICursorHider, CursorHiderService>();
-        services.AddHostedService<SlaveLocalInputWatcher>();
-
-        // forwarder buffers log entries; SlaveLogSender drains them to masters
-        var forwarder = new SlaveLogForwarder();
-        services.AddSingleton(forwarder);
-        services.AddSereneCustomLogging(e => forwarder.ForwardAsync(e).AsTask(), c => c.MinLogLevel = LogLevel.Debug);
-        services.AddHostedService<SlaveLogSender>();
-
+            var handler = sp.GetRequiredService<WindowsOutputHandler>();
+            handler.Initialize();
+            return new CoalescingOutputWrapper(handler);
+        });
+        services.AddSingleton<ICursor>(sp => sp.GetRequiredService<WindowsOutputHandler>());
+#pragma warning restore CA1416
+        services.AddSingleton<IPlatformInput>(sp => new RoleAwarePlatformInput(
+            sp.GetRequiredService<IHydraProfile>(),
+            sp.GetRequiredService<WindowsInputHandler>(),
+            sp.GetRequiredService<ICursor>()));
     }
+    else if (linuxConsoleMode)
+    {
+        if (!profile.RemoteOnly)
+        {
+            Console.Error.WriteLine("No display server available (DISPLAY not set). Set remoteOnly: true in hydra.conf for console operation.");
+            return;
+        }
+        services.AddSingleton<IPlatformInput, EvdevInputHandler>();
+        services.AddSingleton<ILocalEventTap>(sp => sp.GetRequiredService<IPlatformInput>());
+        services.AddSingleton<IPlatformOutput, NullPlatformOutput>();
+    }
+    else if (OperatingSystem.IsLinux())
+    {
+        services.AddSingleton<XorgInputHandler>();
+        services.AddSingleton<ILocalEventTap>(sp => sp.GetRequiredService<XorgInputHandler>());
+        services.AddSingleton<XorgOutputHandler>();
+        services.AddSingleton<IPlatformOutput>(sp => new CoalescingOutputWrapper(sp.GetRequiredService<XorgOutputHandler>()));
+        services.AddSingleton<ICursor>(sp => sp.GetRequiredService<XorgOutputHandler>());
+        services.AddSingleton<IPlatformInput>(sp => new RoleAwarePlatformInput(
+            sp.GetRequiredService<IHydraProfile>(),
+            sp.GetRequiredService<XorgInputHandler>(),
+            sp.GetRequiredService<ICursor>()));
+    }
+    else
+        throw new PlatformNotSupportedException($"Unsupported OS: {Environment.OSVersion}");
+
+    services.AddHostedService<ICursorHider, CursorHiderService>();
+    services.AddHostedService<InputRouter>();
+    services.AddHostedService<SlaveLocalInputWatcher>();
+
+    // Log forwarding is the follower's job — it is the controller that collects. Nothing here is
+    // gated on the role: SlaveLogSender only ever sends to hosts that announced themselves as the
+    // controller, so on the computer holding the keyboard it simply has nowhere to send.
+    var forwarder = new SlaveLogForwarder();
+    services.AddSingleton(forwarder);
+    // Entries received from a peer (category "slave:{host}/…") must never be forwarded on: the peer
+    // logs them, forwards them, and the category grows one prefix per hop. They stop here.
+    services.AddSereneCustomLogging(e => e.Category.StartsWith("slave:", StringComparison.OrdinalIgnoreCase)
+        ? Task.CompletedTask
+        : forwarder.ForwardAsync(e).AsTask(), c => c.MinLogLevel = LogLevel.Debug);
+    services.AddHostedService<SlaveLogSender>();
 
     if (OperatingSystem.IsMacOS())
         services.AddHostedService<IScreenSaverSync, MacScreenSaverSync>();
@@ -508,10 +513,10 @@ if (config != null)
         services.AddHostedService<LanDiscoveryBroadcaster>();
     }
 
-    if (profile.Mode == Mode.Slave)
-        services.AddHostedService<IRelaySender, SlaveRelayConnection>();
-    else
-        services.AddHostedService<IRelaySender, MasterRelayConnection>();
+    // Every computer runs the same connection: it injects the input the peers send, answers their
+    // clipboard and file-transfer requests, and falls everything else through to whoever is
+    // listening. There is nothing role-specific left in it to choose between.
+    services.AddHostedService<IRelaySender, SlaveRelayConnection>();
     services.AddSingleton<IActivityTracker, ActivityTracker>();
     services.AddSingleton<ISceneCoordinator, SceneCoordinator>();
     services.AddHostedService(sp => (SceneCoordinator)sp.GetRequiredService<ISceneCoordinator>());

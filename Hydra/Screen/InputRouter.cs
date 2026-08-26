@@ -35,6 +35,12 @@ public class InputRouter(
     private const int MaxMouseHz = 125; // should divide evenly by 1000
     private const int MinMouseIntervalMs = 1000 / MaxMouseHz;
 
+    // Routing belongs to the computer holding the keyboard and mouse. The router runs on every
+    // computer so the role can change without restarting anything, and does nothing at all on the
+    // ones that are following — exactly as if it had not been started there, which is what used to
+    // happen. Read live: it changes the moment the desk hands control over.
+    private bool Routing => profile.IsController;
+
     private readonly IWorldState _peerState = peerState ?? new WorldState();
     private readonly Func<long> _getTickCount = getTickCount ?? (() => Environment.TickCount64);
 
@@ -152,8 +158,12 @@ public class InputRouter(
         _screenSaverSync.ScreensaverDeactivated += OnScreensaverDeactivated;
         _screenSaverSync.ScreenLocked += OnLockDetected;
         _screenSaverSync.ScreenUnlocked += OnScreenUnlocked;
-        if (profile.HideCursor)
+        // hideCursor belongs to the computer driving the desk; it travels in the shared document
+        // like everything else, so a follower would otherwise hide its own cursor on its own screen
+        if (profile.HideCursor && Routing)
             cursorHider.Hide();
+
+        profile.ControllerChanged += OnControllerChanged;
 
         _deadman = new Timer(_ => CheckForStall(), null, StallReleaseMs / 4, StallReleaseMs / 4);
     }
@@ -175,6 +185,7 @@ public class InputRouter(
         _screenSaverSync.ScreensaverDeactivated -= OnScreensaverDeactivated;
         _screenSaverSync.ScreenLocked -= OnLockDetected;
         _screenSaverSync.ScreenUnlocked -= OnScreenUnlocked;
+        profile.ControllerChanged -= OnControllerChanged;
         platform.StopEventTap();
 
         // drain remaining commands, then stop consumer
@@ -192,6 +203,48 @@ public class InputRouter(
             platform.IsOnVirtualScreen = false;
             cursorHider.Show();
         }
+    }
+
+    // Control moved. Nothing is created or destroyed here: both halves have been running all
+    // along, and this is the moment they change which one is in charge.
+    private void OnControllerChanged()
+    {
+        if (Routing)
+        {
+            // Taking over. The peers have to be told who to answer to now — they learn it from
+            // MasterConfig, which until this moment came from somebody else.
+            log.LogInformation("This computer now has the keyboard and mouse");
+            // Whoever was the controller a moment ago is filed here as this machine's master, from
+            // the MasterConfig it sent while it still was one. Left there, this computer would keep
+            // forwarding its logs to a machine that is now following it.
+            _ = _peerState.PruneMasters([]);
+            var payload = MessageSerializer.Encode(MessageKind.MasterConfig, new MasterConfigMessage(profile.LogLevel));
+            foreach (var host in profile.RemoteHosts.Select(h => h.Name))
+                relay.Send([host], payload);
+            _ = RebuildForNewCrossingsAsync();
+            return;
+        }
+
+        // Giving it up. If the pointer is standing on another computer's screen it has to come
+        // home first: the local input hooks are swallowing everything on the promise that this
+        // router is forwarding it, and a router that has just stopped forwarding would leave this
+        // machine with no keyboard and no mouse at all.
+        log.LogInformation("The keyboard and mouse moved to {Host}", profile.Controller ?? "another computer");
+        _ = _commands.Writer.TryWrite(async st =>
+        {
+            if (st.Mouse.IsOnVirtualScreen && st.Mouse.CurrentScreen != null)
+            {
+                var host = LeaveVirtualScreen(st, out var warpX, out var warpY);
+                if (host != null)
+                {
+                    ReturnToLocalScreen(warpX, warpY);
+                    ShowCursorOnReturn();
+                }
+            }
+            platform.IsOnVirtualScreen = false;
+            cursorHider.Show();
+            await ValueTask.CompletedTask;
+        });
     }
 
     private async Task ProcessCommands()
@@ -447,13 +500,15 @@ public class InputRouter(
         // peer did (Abort tears down ANY transfer, so the old cursor-screen-coupled call aborted unrelated ones)
         _fileTransfer.AbortIfPeerGone(current, relay);
 
-        // send MasterConfig only to newly appeared peers that are configured as slaves
-        foreach (var host in delta.NewPeers)
-        {
-            var payload = MessageSerializer.Encode(MessageKind.MasterConfig, new MasterConfigMessage(profile.LogLevel));
-            relay.Send([host], payload);
-            log.LogDebug("Sent MasterConfig to {Host}", host);
-        }
+        // send MasterConfig only to newly appeared peers, and only while this computer is the one
+        // holding the keyboard — it is the message that tells a peer who to treat as the controller
+        if (Routing)
+            foreach (var host in delta.NewPeers)
+            {
+                var payload = MessageSerializer.Encode(MessageKind.MasterConfig, new MasterConfigMessage(profile.LogLevel));
+                relay.Send([host], payload);
+                log.LogDebug("Sent MasterConfig to {Host}", host);
+            }
 
         if (profile.RemoteOnly)
         {
@@ -483,6 +538,7 @@ public class InputRouter(
 
     private void OnScreensaverActivated()
     {
+        if (!Routing) return;  // the controller syncs the screensaver; the others follow it
         _ = _commands.Writer.TryWrite(async st =>
         {
             if (st.ScreensaverActive) return;
@@ -556,7 +612,7 @@ public class InputRouter(
 
     private void OnLockDetected()
     {
-        if (!profile.ScreenLockPropagation) return;
+        if (!Routing || !profile.ScreenLockPropagation) return;
         _ = _commands.Writer.TryWrite(async st =>
         {
             log.LogInformation("Machine locked — propagating to slaves");
@@ -910,6 +966,10 @@ public class InputRouter(
 
     private void OnKeyEvent(KeyEvent keyEvent)
     {
+        // Not the controller: every key is this machine's own. Not forwarded, not swallowed by a
+        // hotkey, and not read for a file copy the user meant for their own file manager.
+        if (!Routing) return;
+
         var label = keyEvent.Character.HasValue ? $" '{keyEvent.Character}'" : keyEvent.Key.HasValue ? $" {keyEvent.Key}" : "";
 
         PostInput(async st =>
@@ -1168,6 +1228,7 @@ public class InputRouter(
 
     private void OnMouseButton(MouseButtonEvent e)
     {
+        if (!Routing) return;
         PostInput(async st =>
         {
             st.LastInputTick = _getTickCount();
@@ -1182,6 +1243,7 @@ public class InputRouter(
 
     private void OnMouseScroll(MouseScrollEvent e)
     {
+        if (!Routing) return;
         PostInput(async st =>
         {
             st.LastInputTick = _getTickCount();
@@ -1257,6 +1319,7 @@ public class InputRouter(
 
     private void OnMouseMove(double x, double y)
     {
+        if (!Routing) return;
         PostInput(async st =>
         {
             st.LastInputTick = _getTickCount();
@@ -1573,6 +1636,7 @@ public class InputRouter(
     // feeds directly into VirtualMouseState — no warp-point math needed.
     private void OnMouseDelta(double dx, double dy)
     {
+        if (!Routing) return;
         PostInput(async st =>
         {
             st.LastInputTick = _getTickCount();

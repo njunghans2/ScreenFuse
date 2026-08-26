@@ -400,11 +400,11 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             return DeskActionResult.Fail($"{host} is not connected, so it cannot take control yet.");
 
         // Handing over is symmetric: whoever asks tells everyone, including the computer that has
-        // control today, and every agent restarts into its new role.
+        // control today, and each machine changes role where it stands.
         Send(_peers, MessageSerializer.Encode(MessageKind.DeskCommand, new DeskCommandMessage(DeskCommandKind.SetController, Host: host)));
         ApplyController(host);
         await Task.CompletedTask;
-        return DeskActionResult.Ok($"Handing the keyboard and mouse to {host}…");
+        return DeskActionResult.Ok($"{host} now has the keyboard and mouse.");
     }
 
     public Task<DeskActionResult> SaveSceneAsync(string name, CancellationToken cancellationToken = default) =>
@@ -553,6 +553,13 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             // than like the missing step it is.
             await WakeForSwitchAsync(host, cancel);
 
+            // …and put its display for *this* monitor back on its desktop before the input moves,
+            // not after. Waking a computer is not the same as it driving the panel: a display that
+            // was removed from the desktop stays removed, so the monitor still arrived at a socket
+            // with no signal on it. This used to run at the end of the switch, several seconds
+            // after the monitor had already given up and hunted back.
+            await PrepareGainingDisplayAsync(monitor, host, cancel);
+
             if (target?.Input is { } input)
             {
                 result = await SwitchAsync(owner!, ddcId!, input, cancel);
@@ -616,9 +623,10 @@ var held = true;
 
         // The monitor now shows another computer, so every computer it is wired to but no longer
         // shows must drop the display from its desktop — otherwise windows and the pointer keep
-        // living on the invisible panel. The gaining computer's display is (re)connected by the
-        // wake; this handles the losers, and re-enables the gaining side's own display.
-        await ApplyTopologyForSwitchAsync(monitor, host, cancel);
+        // living on the invisible panel. The gaining side was seen to before the switch; this is
+        // the losers, and it deliberately runs after the hold loop above: dropping a display takes
+        // its DDC channel with it, and the loser is the computer that commands this monitor.
+        await ReleaseLosingDisplaysAsync(monitor, host, cancel);
 
 // The monitor now belongs to someone else, so the pointer crosses somewhere else. Derived
         // and handed over now rather than at the next round: waiting meant the crossings stayed
@@ -1380,7 +1388,6 @@ var rebuilt = RebuildHosts(_config);
             case MessageKind.DeskState when !IsController:
             {
                 var state = new DecodedMessage(kind, body).Deserialize<DeskStateMessage>();
-                _controller = state.Controller;
 
                 // The controller's hand-taken control travels with the state, so a machine that
                 // missed the handover command still ends up agreeing on the next broadcast —
@@ -1393,6 +1400,19 @@ var rebuilt = RebuildHosts(_config);
                         _controllerStore.Clear();
                 }
                 catch (Exception ex) { _log.LogDebug(ex, "Could not mirror the controller override"); }
+
+                // The controller travels with the picture, so a computer that missed the handover
+                // command agrees on the next broadcast — including when the name it reads is its
+                // own, which is how a machine finds out it has just been handed control. The
+                // override above is already on disk, so this only has to change the role.
+                ApplyControllerLive(state.Controller);
+                _controller = state.Controller;
+
+                // If that name was our own we are the controller as of this instant, and the
+                // follower's picture below — which says plainly that it is not — must not be built
+                // over the top of it. The next round is ours to broadcast.
+                if (IsController) break;
+
                 _snapshot = new DeskSnapshot(
                     state.Controller, LocalName, state.Hosts, state.ConnectedHosts,
                     state.Monitors.Select(m => new DeskMonitorView(
@@ -1451,17 +1471,38 @@ var rebuilt = RebuildHosts(_config);
         if (!result.Accepted) _log.LogWarning("Desk command {Kind} from {Host} refused: {Message}", command.Kind, sourceHost, result.Message);
     }
 
+    // Handing the keyboard over used to restart every agent into its new role. It was the only
+    // way: the process picked its role at startup and built one half of the desk around it, so
+    // there was nothing to change over. Both halves run on every computer now, and this is the
+    // whole of the handover — write it down, and say so.
     private void ApplyController(string host)
     {
+        if (string.IsNullOrWhiteSpace(host) || host.Equals(_controller, StringComparison.OrdinalIgnoreCase)) return;
+
+        // On disk first. A computer restarted for any other reason has to come back in the role it
+        // was in, not the one its config file was written with — the override is what outranks the
+        // controller the scene names, and it is the only record of a choice made by hand.
         try { _controllerStore.Write(host); }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "Could not record the new controller");
             return;
         }
+        ApplyControllerLive(host);
+    }
+
+    // The role change on its own, for the paths that have already settled where it is written down
+    // — a follower reading the controller off the broadcast picture has had its override mirrored
+    // for it a moment earlier, and must not write a second, different answer over the top.
+    private void ApplyControllerLive(string host)
+    {
+        if (string.IsNullOrWhiteSpace(host) || host.Equals(_controller, StringComparison.OrdinalIgnoreCase)) return;
         _controller = host;
-        _log.LogInformation("Control moves to {Host}; restarting into the new role", host);
-        ScheduleRestart();
+        _profile.ApplyController(host);
+        _snapshot = _snapshot with { Controller = host, IsController = IsController };
+        _log.LogInformation("The keyboard and mouse moved to {Host}", host);
+        Broadcast();
+        Changed?.Invoke();
     }
 
     private async Task ApplyPushedConfigAsync(string sourceHost, DeskConfigPushMessage push)
@@ -1486,14 +1527,13 @@ var rebuilt = RebuildHosts(_config);
             // no way to treat someone dragging a monitor around a settings window.
             ApplyLayout();
 
-            if (DeskConfigStore.SameRuntime(local, merged))
-            {
-                _log.LogDebug("Desk updated by {Host}", sourceHost);
-                Changed?.Invoke();
-                return;
-            }
-            _log.LogInformation("Who holds the keyboard changed ({Host}); restarting into the new role", sourceHost);
-            ScheduleRestart();
+            // Who holds the keyboard is deliberately NOT taken from here. A document still names
+            // whichever computer it was written with, and control handed over by hand outranks
+            // that — reading it back out of the document would hand control straight back to the
+            // machine that just gave it up. The handover travels as its own command, and as the
+            // controller name on every broadcast picture.
+            _log.LogDebug("Desk updated by {Host}", sourceHost);
+            Changed?.Invoke();
         }
         catch (Exception ex) { _log.LogWarning(ex, "Ignoring an unusable desk document from {Host}", sourceHost); }
     }
