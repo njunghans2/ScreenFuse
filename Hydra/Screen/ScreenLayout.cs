@@ -15,6 +15,10 @@ public class ScreenLayout(List<ScreenRect> screens, List<HostConfig> configs, in
     private readonly Dictionary<(string Name, Direction Dir), List<EdgeLink>> _graph = BuildGraph(screens, configs, log);
     private readonly Dictionary<string, int> _deadCorners = BuildDeadCorners(screens, configs, defaultDeadCorners, screenScales);
 
+    // debug: which crossing edges were built for a screen (diagnoses crossings that go nowhere)
+    public string EdgeKeys(string screen) =>
+        string.Join(",", _graph.Keys.Where(k => k.Name == screen).Select(k => k.Dir));
+
     private static Dictionary<(string, Direction), List<EdgeLink>> BuildGraph(
         List<ScreenRect> screens, List<HostConfig> configs, ILogger log)
     {

@@ -489,6 +489,14 @@ internal static partial class NativeMethods
     [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
     internal static partial short GetKeyState(int nVirtKey);
 
+    // The physical state, independent of this thread's message queue. GetKeyState answers from the
+    // thread's own last retrieved message, so a thread that never retrieves input (the router's
+    // consumer) gets a stale answer — and a crossing that checks the button state would sail
+    // through mid-drag. GetAsyncKeyState reads the hardware state at the moment of the call.
+    [LibraryImport(User32)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
+    internal static partial short GetAsyncKeyState(int nVirtKey);
+
     // -- session lock detection --
 
     internal static readonly nint HWND_MESSAGE = new(-3);

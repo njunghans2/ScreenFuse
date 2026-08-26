@@ -34,9 +34,6 @@ public sealed class CursorHiderService(ILogger<CursorHiderService> log, IPlatfor
     private bool _localActive;
     private bool _pendingHide;
     private bool _pendingShow;
-    private bool _hasWarpPoint;
-    private int _warpX;
-    private int _warpY;
 
     private (int X, int Y)? _lastPosition;
     private Timer? _pollTimer;
@@ -71,15 +68,16 @@ public sealed class CursorHiderService(ILogger<CursorHiderService> log, IPlatfor
 
     public void UpdateWarpPoint(int x, int y)
     {
-        lock (_stateLock) { _warpX = x; _warpY = y; _hasWarpPoint = true; }
+        // The warp point used to pin the cursor while hidden — which fought the trackpad the
+        // moment the pointer left (the cursor snapped back to the center every second). Nothing
+        // pins the cursor anymore; the point is only kept for interface compatibility.
     }
 
     protected override async Task Execute(CancellationToken cancel)
     {
         // decide the action (and consume the pending flag) atomically under the lock, then run the platform
         // call outside it — never hold the lock across an await.
-        bool doHide = false, doShow = false, doWarp = false;
-        int warpX = 0, warpY = 0;
+        bool doHide = false, doShow = false;
         lock (_stateLock)
         {
             if (_pendingHide)
@@ -92,12 +90,6 @@ public sealed class CursorHiderService(ILogger<CursorHiderService> log, IPlatfor
                 _pendingShow = false;
                 doShow = true;
             }
-            else if (_hideIntent && !_localActive && _hasWarpPoint)
-            {
-                doWarp = true;
-                warpX = _warpX;
-                warpY = _warpY;
-            }
         }
 
         if (doHide)
@@ -107,16 +99,6 @@ public sealed class CursorHiderService(ILogger<CursorHiderService> log, IPlatfor
         else if (doShow)
         {
             await platform.ShowCursor();
-        }
-        else if (doWarp)
-        {
-            // keep cursor pinned at warp point while hidden — don't warp when temporarily shown.
-            platform.WarpCursor(warpX, warpY);
-            lock (_stateLock) _lastPosition = (warpX, warpY); // set after the physical warp (matches OnPoll's baseline)
-            // re-hide if cursor became visible — on macOS CGDisplayHideCursor is reference-counted
-            // and can be decremented externally; CursorIsVisible detects that so we only re-hide when needed.
-            if (platform.CursorIsVisible)
-                await platform.HideCursor();
         }
     }
 

@@ -155,12 +155,15 @@ public sealed class WindowsInputHandler(ILogger<WindowsInputHandler> log, IHydra
     public bool AnyMouseButtonHeld()
     {
         // VK_LBUTTON=0x01, VK_RBUTTON=0x02, VK_MBUTTON=0x04, VK_XBUTTON1=0x05, VK_XBUTTON2=0x06
-        // high bit (0x8000) set means the key is currently down
-        return (NativeMethods.GetKeyState(0x01) & 0x8000) != 0
-            || (NativeMethods.GetKeyState(0x02) & 0x8000) != 0
-            || (NativeMethods.GetKeyState(0x04) & 0x8000) != 0
-            || (NativeMethods.GetKeyState(0x05) & 0x8000) != 0
-            || (NativeMethods.GetKeyState(0x06) & 0x8000) != 0;
+        // high bit (0x8000) set means the key is currently down.
+        // GetAsyncKeyState, not GetKeyState: this is asked from the router's consumer thread,
+        // which never retrieves input messages, so GetKeyState would answer with a stale state —
+        // and a drag would cross to the other computer, button still down, mid-gesture.
+        return (NativeMethods.GetAsyncKeyState(0x01) & 0x8000) != 0
+            || (NativeMethods.GetAsyncKeyState(0x02) & 0x8000) != 0
+            || (NativeMethods.GetAsyncKeyState(0x04) & 0x8000) != 0
+            || (NativeMethods.GetAsyncKeyState(0x05) & 0x8000) != 0
+            || (NativeMethods.GetAsyncKeyState(0x06) & 0x8000) != 0;
     }
 
     public ValueTask DisposeAsync() { StopEventTap(); return ValueTask.CompletedTask; }

@@ -95,6 +95,16 @@ public sealed class MacOutputHandler : IPlatformOutput, ICursor
 
     public void MoveMouseRelative(int dx, int dy)
     {
+        // The tracked position goes stale the moment the user touches the trackpad: the OS cursor
+        // moves without telling this app, and a relative move from the stale anchor lands the
+        // cursor somewhere else entirely — the pointer jitters, sticks, and fights the hand that
+        // moved it. Anchor every relative move at the cursor's real position, then apply the
+        // delta the master routed.
+        if (GetCursorPosition() is { } real)
+        {
+            _mouseX = real.X;
+            _mouseY = real.Y;
+        }
         _mouseX += dx;
         _mouseY += dy;
         _mousePositionInitialized = true;
@@ -675,13 +685,38 @@ public sealed class MacOutputHandler : IPlatformOutput, ICursor
     }
     public Task WaitForAccessibilityTrusted(CancellationToken cancel) => NativeMethods.WaitForAccessibilityTrusted(cancel);
 
+    // Returning null here is not a harmless "don't know": the position reports stop, the master's
+    // model of where this cursor is goes stale, and the crossing back never lines up. So the
+    // question is asked twice — once of the session's own event state, then of this app's event
+    // source — before giving up.
     public (int X, int Y)? GetCursorPosition()
     {
-        var eventRef = NativeMethods.CGEventCreate(nint.Zero);
-        if (eventRef == nint.Zero) return null;
-        var pos = NativeMethods.CGEventGetLocation(eventRef);
-        NativeMethods.CFRelease(eventRef);
-        return ((int)pos.X, (int)pos.Y);
+        try
+        {
+            var eventRef = NativeMethods.CGEventCreate(nint.Zero);
+            if (eventRef != nint.Zero)
+            {
+                var pos = NativeMethods.CGEventGetLocation(eventRef);
+                NativeMethods.CFRelease(eventRef);
+                return ((int)pos.X, (int)pos.Y);
+            }
+            if (EventSource != nint.Zero)
+            {
+                eventRef = NativeMethods.CGEventCreate(EventSource);
+                if (eventRef != nint.Zero)
+                {
+                    var pos = NativeMethods.CGEventGetLocation(eventRef);
+                    NativeMethods.CFRelease(eventRef);
+                    return ((int)pos.X, (int)pos.Y);
+                }
+            }
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Could not read the cursor position");
+            return null;
+        }
     }
 
     public ValueTask HideCursor()
