@@ -225,25 +225,29 @@ public class InputRouter(
             return;
         }
 
-        // Giving it up. If the pointer is standing on another computer's screen it has to come
-        // home first: the local input hooks are swallowing everything on the promise that this
-        // router is forwarding it, and a router that has just stopped forwarding would leave this
-        // machine with no keyboard and no mouse at all.
+        // Giving it up. If the pointer is standing on another computer's screen it has to come all
+        // the way home first, and "all the way" is the part that was missing: the local hooks are
+        // swallowing input on the promise that this router is forwarding it, and the computer being
+        // stood on is holding the cursor hidden until it is told the pointer left. A router that
+        // simply stopped forwarding left this machine with no keyboard and no mouse, and the other
+        // one convinced a pointer was still on it — so nothing could cross back either way.
         log.LogInformation("The keyboard and mouse moved to {Host}", profile.Controller ?? "another computer");
         _ = _commands.Writer.TryWrite(async st =>
         {
-            if (st.Mouse.IsOnVirtualScreen && st.Mouse.CurrentScreen != null)
+            var host = LeaveVirtualScreen(st, out var warpX, out var warpY);
+            if (host != null)
             {
-                var host = LeaveVirtualScreen(st, out var warpX, out var warpY);
-                if (host != null)
-                {
-                    ReturnToLocalScreen(warpX, warpY);
-                    ShowCursorOnReturn();
-                }
+                ReturnToLocalScreen(warpX, warpY);
+                ShowCursorOnReturn();
+                if (relay.IsConnected) LeaveRemoteScreen(host);
+                log.LogInformation("Gave up control while on '{Host}' — pointer returned home", host);
             }
+
+            // Unconditionally, even when the pointer was already at home: whatever this machine was
+            // in the middle of, it is not routing any more and must not be left swallowing input.
             platform.IsOnVirtualScreen = false;
+            await platform.ShowCursor();
             cursorHider.Show();
-            await ValueTask.CompletedTask;
         });
     }
 

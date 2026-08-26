@@ -353,11 +353,14 @@ public class TwoComputerDeskTests
     }
 
     [Test]
-    public async Task SwitchingTheLastMonitorAwayBlanksItInsteadOfRemovingIt()
+    public async Task SwitchingTheLastMonitorAwayStopsThisComputersOutputInsteadOfBlankingThePanel()
     {
         // An OS with no display to render is a soft-locked OS: the last display is never removed
-        // from the desktop — its panel is blanked instead, and it stays that way until a switch
-        // brings another display (or itself) back.
+        // from the desktop. What stops instead is this computer's own video output — never the
+        // panel. Blanking is a DDC command to the *monitor*, and a monitor has one power state no
+        // matter how many computers are wired to it: it blacked the panel out for the computer
+        // that had just won the switch, which is a black screen the monitor's own power button was
+        // the only way out of.
         using var desk = await Desk.ConvergedAsync();
 
         await desk.SwitchAsync(desk.Aorus, "Mac");
@@ -368,11 +371,39 @@ public class TwoComputerDeskTests
             var commands = desk.Windows.Router.Commands;
             Assert.That(commands, Does.Not.Contain(@"disable \\.\DISPLAY2"),
                 "the last display must not be removed from the desktop");
-            Assert.That(commands, Does.Contain(@"blank \\.\DISPLAY2"),
-                "the last display is blanked instead of removed");
+            Assert.That(commands, Does.Not.Contain(@"blank \\.\DISPLAY2"),
+                "a monitor that has just changed hands must never be told to blank its panel");
+            Assert.That(commands, Does.Contain("sleep"),
+                "this computer stops driving its output instead");
             var benq = desk.Windows.Snapshot.Monitors.Single(m => m.Id == desk.Benq);
             Assert.That(benq.Sleeping, Is.True, "the desk records that the monitor is the blanked last display");
             Assert.That(desk.Windows.Snapshot.Crossings, Is.Empty, "a black panel is not a crossing destination");
+        }
+    }
+
+    [Test]
+    public async Task TheGainingComputersDisplayIsBackOnItsDesktopBeforeTheInputMoves()
+    {
+        // Waking a computer is not the same as it driving the panel: a display removed from the
+        // desktop on the way out stays removed, so the monitor still arrived at a socket with no
+        // signal on it and hunted back to the computer it had been told to leave. Re-enabling it
+        // used to be the last step of the switch, seconds after the monitor had given up.
+        using var desk = await Desk.ConvergedAsync();
+
+        await desk.SwitchAsync(desk.Benq, "Mac");
+        desk.Windows.Router.Commands.Clear();
+        await desk.SwitchAsync(desk.Benq, "NINOG");
+
+        var commands = desk.Windows.Router.Commands;
+        var enabled = commands.IndexOf(@"enable \\.\DISPLAY2");
+        var switched = commands.FindIndex(c => c.StartsWith(@"input \\.\DISPLAY2=", StringComparison.Ordinal));
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(enabled, Is.GreaterThanOrEqualTo(0),
+                "the computer the monitor is going to has to put that display back on its desktop");
+            Assert.That(switched, Is.GreaterThanOrEqualTo(0), "pre-condition: the monitor was switched");
+            Assert.That(enabled, Is.LessThan(switched),
+                "and it has to happen before the input moves, not after the monitor has given up");
         }
     }
 

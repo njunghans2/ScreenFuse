@@ -94,7 +94,7 @@ internal static class MacDisplayWake
     // Enables or disables one display by its UUID (the monitor identity the desk config carries),
     // so a monitor that switched to another computer can be removed from — or restored to — the
     // Mac's arrangement. Returns false when the display is unknown or the configuration failed.
-    internal static bool SetDisplayConnected(string uuid, bool connected)
+    internal static unsafe bool SetDisplayConnected(string uuid, bool connected)
     {
         if (Configure == null) return false;
         var record = LoadRemembered().Values.FirstOrDefault(r => r.Uuid.Equals(uuid, StringComparison.OrdinalIgnoreCase));
@@ -102,6 +102,13 @@ internal static class MacDisplayWake
         // The current display id wins over the remembered one: ids shift when a display is
         // disabled and re-enabled, and configuring the stale id is refused by the window server.
         var live = OnlineRecords().FirstOrDefault(d => d.Uuid.Equals(uuid, StringComparison.OrdinalIgnoreCase));
+
+        // A display that is already driving is left alone. The switch's hold loop asks for this
+        // every few hundred milliseconds — the monitor's hot-plug blip can drop the display at any
+        // point in that window — and a display configuration for a display that needs none still
+        // reconfigures the arrangement, which the user sees as the desktop flickering.
+        if (connected && live != null && ActiveDisplayIds().Contains(live.DisplayId)) return true;
+
         if (!SetConnected((live ?? record).DisplayId, connected)) return false;
         Remember([record with { Connected = connected }]);
         return true;

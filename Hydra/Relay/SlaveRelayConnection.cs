@@ -79,6 +79,16 @@ public class SlaveRelayConnection : RelayConnection
         _positionTimer = new System.Threading.Timer(_ => ReportCursorPosition(), null,
             TimeSpan.FromSeconds(1), TimeSpan.FromMilliseconds(120));
 
+        profile.ControllerChanged += () =>
+        {
+            if (!_profile.IsController) return;
+            _ = Task.Run(async () =>
+            {
+                try { await OnBecameController(); }
+                catch (Exception ex) { _log.LogWarning(ex, "Could not clear the pointer state after taking control"); }
+            });
+        };
+
         _screens.ScreensChanged += async snapshot =>
         {
             // sleeping displays enumerate to whatever the OS still lists, usually a single phantom screen.
@@ -300,6 +310,19 @@ public class SlaveRelayConnection : RelayConnection
                 await base.OnReceive(sourceHost, kind, body);
                 break;
         }
+    }
+
+    // Taking control while another computer's pointer is standing on this screen leaves that
+    // computer's claim behind: the cursor stays hidden and the keys stay held, waiting for a
+    // LeaveScreen from a machine that is no longer driving. The peer sends one as it steps down,
+    // but this machine must not depend on that message arriving to get its own cursor back.
+    internal async Task OnBecameController()
+    {
+        ClearOnScreenMasters();
+        await ReleaseAllKeys();
+        await _peerState.PruneMasters([]);
+        _cursorHider.Show();
+        _log.LogInformation("Took control — cleared any pointer that was standing on this computer");
     }
 
     protected override async Task OnDisconnected()

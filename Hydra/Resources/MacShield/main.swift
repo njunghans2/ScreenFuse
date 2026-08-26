@@ -51,8 +51,25 @@ func writeError(_ message: String) {
   _ = data.withUnsafeBytes { Darwin.write(STDERR_FILENO, $0.baseAddress!, $0.count) }
 }
 
+// a 1x1 fully transparent cursor — nothing to draw, drawn wherever the pointer is
+let invisibleCursor: NSCursor = {
+  let image = NSImage(size: NSSize(width: 1, height: 1))
+  image.lockFocus()
+  NSColor.clear.setFill()
+  NSRect(x: 0, y: 0, width: 1, height: 1).fill()
+  image.unlockFocus()
+  return NSCursor(image: image, hotSpot: .zero)
+}()
+
 // full-coverage view that participates in hit testing and swallows all mouse events
 class AbsorberView: NSView {
+  // CGDisplayHideCursor takes the pointer away, but it does not keep it away: whatever app owns the
+  // window under the pointer draws a cursor for it again on the next move, and that is the flicker at
+  // the park point. While the shield absorbs, the window under the pointer is this one — so it answers
+  // the move the way the Windows shield answers WM_SETCURSOR, with a cursor that has nothing in it.
+  // .activeAlways is what makes that work from a background app that never becomes frontmost.
+  var hidesCursor = false
+
   override var acceptsFirstResponder: Bool { true }
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -62,16 +79,30 @@ class AbsorberView: NSView {
     addTrackingArea(
       NSTrackingArea(
         rect: bounds,
-        options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways],
+        options: [.mouseEnteredAndExited, .mouseMoved, .cursorUpdate, .activeAlways],
         owner: self,
         userInfo: nil))
   }
 
-  override func mouseEntered(with event: NSEvent) {}
+  // the cursor-rect path covers the case where the shield app is the active one; the event path below
+  // covers every other case, which is the usual one.
+  override func resetCursorRects() {
+    guard hidesCursor else { return super.resetCursorRects() }
+    addCursorRect(bounds, cursor: invisibleCursor)
+  }
+
+  override func cursorUpdate(with event: NSEvent) { applyCursor() }
+  override func mouseEntered(with event: NSEvent) { applyCursor() }
   override func mouseExited(with event: NSEvent) {}
-  override func mouseMoved(with event: NSEvent) {}
+  override func mouseMoved(with event: NSEvent) { applyCursor() }
+  override func mouseDragged(with event: NSEvent) { applyCursor() }
   override func mouseDown(with event: NSEvent) {}
   override func mouseUp(with event: NSEvent) {}
+
+  private func applyCursor() {
+    guard hidesCursor else { return }
+    invisibleCursor.set()
+  }
 }
 
 class ShieldDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDelegate, CWEventDelegate {

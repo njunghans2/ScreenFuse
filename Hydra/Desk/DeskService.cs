@@ -29,6 +29,9 @@ public sealed class DeskService : SimpleHostedService, IDeskService
     private readonly ControllerOverrideStore _controllerStore;
     private readonly ISceneCoordinator _scenes;
     private readonly ILogger<DeskService> _log;
+    // Nothing in the desk restarts the agent any more — handing the keyboard over was the last
+    // thing that did. The seam is kept because that is what the tests watch: a desk that restarts
+    // itself in a loop is a bug this has had twice, and it is invisible without something counting.
     private readonly Action _restart;
     private readonly TimeSpan _restartDelay;
 
@@ -43,7 +46,6 @@ public sealed class DeskService : SimpleHostedService, IDeskService
     private string[] _peers = [];
     private string _controller;
     private DeskSnapshot _snapshot;
-    private int _restartScheduled;
 
     public DeskService(
         IHydraProfile profile,
@@ -660,7 +662,38 @@ var rebuilt = RebuildHosts(_config);
             current?.ActiveHost, current?.Sources ?? [], m.Sleeping);
     }
 
-    private async Task ApplyTopologyForSwitchAsync(DeskMonitorConfig monitor, string gainingHost, CancellationToken cancel)
+    // Puts the gaining computer's display for one monitor back on its desktop, so the panel finds a
+    // signal the instant its input arrives. Cheap and idempotent — a display that is already there
+    // is left alone — which is what lets the hold loop keep calling it: the input change blips the
+    // monitor's hot-plug line, and a computer that reads that as an unplug drops the display again
+    // right when the monitor is looking for it.
+    private async Task PrepareGainingDisplayAsync(DeskMonitorConfig monitor, string gainingHost, CancellationToken cancel)
+    {
+        var gain = monitor.Source(gainingHost);
+        if (string.IsNullOrWhiteSpace(gain?.DdcId)) return;
+
+        if (gainingHost.Equals(LocalName, StringComparison.OrdinalIgnoreCase))
+        {
+            var result = await _router.SetMonitorDisplayEnabledAsync(gain.DdcId, enabled: true, cancel);
+            if (result.Success)
+                _log.LogInformation("Re-enabled local display {DdcId} for {Monitor}: {Detail}",
+                    gain.DdcId, monitor.DisplayName(), result.Detail);
+            else
+                _log.LogDebug("Local display {DdcId} for {Monitor} needed no re-enabling: {Detail}",
+                    gain.DdcId, monitor.DisplayName(), result.Detail);
+        }
+        else if (_peers.Contains(gainingHost, StringComparer.OrdinalIgnoreCase))
+        {
+            // A remote gaining computer was never asked to do this at all: it was left to its own
+            // wake to put the display back, which only macOS's reconnect actually does.
+            Send([gainingHost], MessageSerializer.Encode(MessageKind.SetMonitorDisplay,
+                new SetMonitorDisplayMessage(gain.DdcId, Enabled: true)));
+            _log.LogDebug("Asked {Host} to re-enable its display {DdcId} for {Monitor}",
+                gainingHost, gain.DdcId, monitor.DisplayName());
+        }
+    }
+
+    private async Task ReleaseLosingDisplaysAsync(DeskMonitorConfig monitor, string gainingHost, CancellationToken cancel)
     {
         foreach (var source in monitor.Sources)
         {
@@ -669,8 +702,8 @@ var rebuilt = RebuildHosts(_config);
 
             // What would stay on this host after the switch. Two special cases, and they are the
             // point of this method's existence:
-            //  - nothing would stay: the switched monitor is its last display, and the panel is
-            //    blanked instead of removed — an OS with no display to render is a soft-locked OS;
+            //  - nothing would stay: the switched monitor is its last display, and the host stops
+            //    its output rather than remove it — an OS with no display to render is soft-locked;
             //  - only unswitchable displays would stay (a laptop panel wired to nothing else): those
             //    keep the host alive, and they too are blanked rather than left lit — the user asked
             //    for the computer to be off.
@@ -681,50 +714,61 @@ var rebuilt = RebuildHosts(_config);
                 ? new[] { monitor }
                 : remaining.All(v => v.Sources.Count <= 1) ? remaining.Select(v => _config.Monitors.FirstOrDefault(m => m.Id == v.Id)!).Where(m => m != null).ToArray() : [];
 
+            // The monitor that just changed hands is never blanked with DDC. A panel's power state
+            // belongs to the panel, not to one of the computers wired to it: telling it to stand by
+            // blacks it out for the computer that just won it, on a switch that worked. Stopping
+            // this computer's own video output is what was meant, and it is a different call.
+            var handedOver = blank.Any(b => b.Id == monitor.Id);
+            var keeps = blank.Where(b => b.Id != monitor.Id).ToList();
+
             if (source.Host.Equals(LocalName, StringComparison.OrdinalIgnoreCase))
             {
-                if (blank.Any(b => b.Id == monitor.Id))
+                if (handedOver)
                 {
-                    var result = await _router.SetDisplayStandbyAsync(source.DdcId, standby: true, cancel);
-                    _log.LogInformation("Last display for {Host}: blanked {DdcId} instead of disabling ({Success} {Detail})",
+                    var result = await _router.SetDisplayPowerAsync(wake: false, cancel);
+                    _log.LogInformation("Last display for {Host}: stopped this computer's output instead of disabling {DdcId} ({Success} {Detail})",
                         LocalName, source.DdcId, result.Success, result.Detail);
-                    foreach (var keep in blank) await MarkSleepingAsync(keep.Id);
-                    continue;
                 }
-                var disabled = await _router.SetMonitorDisplayEnabledAsync(source.DdcId, enabled: false, cancel);
-                _log.LogInformation("Disabled local display {DdcId} for {Monitor}: {Success} {Detail}",
-                    source.DdcId, monitor.DisplayName(), disabled.Success, disabled.Detail);
+                else
+                {
+                    var disabled = await _router.SetMonitorDisplayEnabledAsync(source.DdcId, enabled: false, cancel);
+                    _log.LogInformation("Disabled local display {DdcId} for {Monitor}: {Success} {Detail}",
+                        source.DdcId, monitor.DisplayName(), disabled.Success, disabled.Detail);
+                }
+                // The panels this computer keeps are its own — nobody else is looking at them — so
+                // those really are a standby. The remote branch always did this; the local one
+                // returned early and left them lit.
+                foreach (var keep in keeps)
+                {
+                    if (keep.Source(LocalName) is { DdcId: not null } keepSource)
+                        await _router.SetDisplayStandbyAsync(keepSource.DdcId, standby: true, cancel);
+                }
             }
             else if (_peers.Contains(source.Host, StringComparer.OrdinalIgnoreCase))
             {
-                if (blank.Any(b => b.Id == monitor.Id))
+                if (handedOver)
                 {
-                    Send([source.Host], MessageSerializer.Encode(MessageKind.SetMonitorStandby,
-                        new SetMonitorStandbyMessage(source.DdcId, Standby: true)));
-                    _log.LogInformation("Asked {Host} to blank its last display {DdcId}", source.Host, source.DdcId);
-                    foreach (var keep in blank) await MarkSleepingAsync(keep.Id);
-                    continue;
+                    Send([source.Host], MessageSerializer.Encode(MessageKind.DeskDisplayPower,
+                        new DeskDisplayPowerMessage(Guid.NewGuid().ToString("N"), Wake: false)));
+                    _log.LogInformation("Asked {Host} to stop its output — {DdcId} was its last display", source.Host, source.DdcId);
                 }
-                Send([source.Host], MessageSerializer.Encode(MessageKind.SetMonitorDisplay,
-                    new SetMonitorDisplayMessage(source.DdcId, Enabled: false)));
-                _log.LogInformation("Asked {Host} to disable its display {DdcId} for {Monitor}",
-                    source.Host, source.DdcId, monitor.DisplayName());
-                foreach (var keep in blank)
+                else
+                {
+                    Send([source.Host], MessageSerializer.Encode(MessageKind.SetMonitorDisplay,
+                        new SetMonitorDisplayMessage(source.DdcId, Enabled: false)));
+                    _log.LogInformation("Asked {Host} to disable its display {DdcId} for {Monitor}",
+                        source.Host, source.DdcId, monitor.DisplayName());
+                }
+                foreach (var keep in keeps)
                 {
                     if (keep.Source(source.Host) is { DdcId: not null } keepSource)
                         Send([source.Host], MessageSerializer.Encode(MessageKind.SetMonitorStandby,
                             new SetMonitorStandbyMessage(keepSource.DdcId, Standby: true)));
-                    await MarkSleepingAsync(keep.Id);
                 }
             }
-        }
+            else continue;
 
-        var gain = monitor.Source(gainingHost);
-        if (gainingHost.Equals(LocalName, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(gain?.DdcId))
-        {
-            var result = await _router.SetMonitorDisplayEnabledAsync(gain.DdcId, enabled: true, cancel);
-            _log.LogInformation("Re-enabled local display {DdcId} for {Monitor}: {Success} {Detail}",
-                gain.DdcId, monitor.DisplayName(), result.Success, result.Detail);
+            foreach (var slept in blank) await MarkSleepingAsync(slept.Id);
         }
     }
 
@@ -867,6 +911,7 @@ var rebuilt = RebuildHosts(_config);
             // drop for a moment, and macOS reads that as an unplug. The drop can lag the switch, so
             // keep re-asking until the monitor actually reports the candidate input.
             await WakeForSwitchAsync(target, cancel);
+            await PrepareGainingDisplayAsync(monitor, target, cancel);
             var inventory = await RequestInventoryAsync(owner, cancel);
             if (CurrentInputOf(inventory, monitor) == candidate) return true;
             if (attempt < 5) await Task.Delay(750, cancel);
@@ -900,6 +945,7 @@ var rebuilt = RebuildHosts(_config);
             // drop can lag the switch, so keep re-asking until the display is back in the
             // arrangement (the display server polls its screens every couple of seconds).
             await WakeForSwitchAsync(host, cancel);
+            await PrepareGainingDisplayAsync(monitor, host, cancel);
             var inventory = await RequestInventoryAsync(host, cancel);
             if (inventory != null && ReportsScreen(inventory, monitor)) return true;
             if (attempt < 5) await Task.Delay(700, cancel);
@@ -930,6 +976,7 @@ var rebuilt = RebuildHosts(_config);
         for (var attempt = 0; attempt < 8; attempt++)
         {
             await WakeForSwitchAsync(target, cancel);
+            await PrepareGainingDisplayAsync(monitor, target, cancel);
             await Task.Delay(300, cancel);
             var inventory = await RequestInventoryAsync(owner, cancel);
             var current = CurrentInputOf(inventory, monitor);
@@ -1569,16 +1616,6 @@ var rebuilt = RebuildHosts(_config);
         if (targets.Length == 0 || !_relay.IsConnected) return;
         try { _relay.Send(targets, payload); }
         catch (Exception ex) { _log.LogDebug(ex, "Desk message could not be sent"); }
-    }
-
-    private void ScheduleRestart()
-    {
-        if (Interlocked.Exchange(ref _restartScheduled, 1) != 0) return;
-        _ = Task.Run(async () =>
-        {
-            await Task.Delay(_restartDelay);
-            _restart();
-        });
     }
 
     // A desk document that cannot be read is not an empty desk.
