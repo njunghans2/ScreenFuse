@@ -19,10 +19,12 @@ internal sealed class MacInputHandler(ILogger<MacInputHandler> log, MacShieldPro
     private Thread? _tapThread;
     private nint _runLoop;
     private nint _tapPort;
-    private Action<double, double>? _onMouseMove;
-    private Action<KeyEvent>? _onKeyEvent;
-    private Action<MouseButtonEvent>? _onMouseButton;
-    private Action<MouseScrollEvent>? _onMouseScroll;
+    // multicast: the symmetric pointer service and the router tap the same input, so each
+    // subscriber's callbacks must all run, not replace each other
+    private readonly List<Action<double, double>> _onMouseMove = [];
+    private readonly List<Action<KeyEvent>> _onKeyEvent = [];
+    private readonly List<Action<MouseButtonEvent>> _onMouseButton = [];
+    private readonly List<Action<MouseScrollEvent>> _onMouseScroll = [];
     private bool _cursorHidden;
     private int _cgHideCursorCount;
     private readonly SemaphoreSlim _cursorLock = new(1, 1);
@@ -125,10 +127,17 @@ internal sealed class MacInputHandler(ILogger<MacInputHandler> log, MacShieldPro
         Action<MouseScrollEvent> onMouseScroll,
         Action? onLocalActivity = null)
     {
-        _onMouseMove = onMouseMove;
-        _onKeyEvent = onKeyEvent;
-        _onMouseButton = onMouseButton;
-        _onMouseScroll = onMouseScroll;
+        _onMouseMove.Add(onMouseMove);
+        _onKeyEvent.Add(onKeyEvent);
+        _onMouseButton.Add(onMouseButton);
+        _onMouseScroll.Add(onMouseScroll);
+
+        // Two services tap the same input (the symmetric pointer service and the router). The
+        // tap must not be re-created: a second CGEventTap with a fresh callback while the first
+        // is still active orphans the first callback, the OS keeps calling it, and the runtime
+        // fails fast on the garbage-collected delegate.
+        if (_tapThread != null)
+            return;
         _tapCallback = TapCallback;  // stored as field -- will crash if collected
         await CreateTapThread();
     }
@@ -240,7 +249,7 @@ internal sealed class MacInputHandler(ILogger<MacInputHandler> log, MacShieldPro
             or NativeMethods.KCGEventOtherMouseDragged)
         {
             var pos = NativeMethods.CGEventGetLocation(eventRef);
-            _onMouseMove?.Invoke(pos.X, pos.Y);
+            foreach (var h in _onMouseMove) h(pos.X, pos.Y);
             return eventRef;
         }
 
@@ -251,7 +260,7 @@ internal sealed class MacInputHandler(ILogger<MacInputHandler> log, MacShieldPro
             var isDown = type is NativeMethods.KCGEventLeftMouseDown or NativeMethods.KCGEventRightMouseDown or NativeMethods.KCGEventOtherMouseDown;
             var cgButton = (int)NativeMethods.CGEventGetIntegerValueField(eventRef, NativeMethods.KCGMouseEventButtonNumber);
             var button = CgButtonToMouseButton(cgButton);
-            _onMouseButton?.Invoke(new MouseButtonEvent(button, isDown));
+            foreach (var h in _onMouseButton) h(new MouseButtonEvent(button, isDown));
             return IsOnVirtualScreen ? nint.Zero : eventRef;
         }
 
@@ -286,7 +295,7 @@ internal sealed class MacInputHandler(ILogger<MacInputHandler> log, MacShieldPro
                 }
             }
             if (wireX != 0 || wireY != 0)
-                _onMouseScroll?.Invoke(new MouseScrollEvent(wireX, wireY));
+                foreach (var h in _onMouseScroll) h(new MouseScrollEvent(wireX, wireY));
             return IsOnVirtualScreen ? nint.Zero : eventRef;
         }
 
@@ -298,7 +307,7 @@ internal sealed class MacInputHandler(ILogger<MacInputHandler> log, MacShieldPro
             var keyEvents = _keyResolver.Resolve(type, eventRef);
             if (keyEvents is not null)
                 foreach (var keyEvent in keyEvents)
-                    if (keyEvent is not null) _onKeyEvent?.Invoke(keyEvent);
+                    if (keyEvent is not null) foreach (var h in _onKeyEvent) h(keyEvent);
             return IsOnVirtualScreen ? nint.Zero : eventRef;
         }
 
@@ -342,7 +351,7 @@ internal sealed class MacInputHandler(ILogger<MacInputHandler> log, MacShieldPro
         if (!specialKey.HasValue) return;
 
         var keyEvent = KeyEvent.Special(isDown ? KeyEventType.KeyDown : KeyEventType.KeyUp, specialKey.Value, KeyModifiers.None);
-        _onKeyEvent?.Invoke(keyEvent);
+        foreach (var h in _onKeyEvent) h(keyEvent);
     }
 
     private static SpecialKey? NxKeyTypeToSpecialKey(uint type) => type switch
