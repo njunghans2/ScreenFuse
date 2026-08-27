@@ -51,16 +51,6 @@ func writeError(_ message: String) {
   _ = data.withUnsafeBytes { Darwin.write(STDERR_FILENO, $0.baseAddress!, $0.count) }
 }
 
-// a 1x1 fully transparent cursor — nothing to draw, drawn wherever the pointer is
-let invisibleCursor: NSCursor = {
-  let image = NSImage(size: NSSize(width: 1, height: 1))
-  image.lockFocus()
-  NSColor.clear.setFill()
-  NSRect(x: 0, y: 0, width: 1, height: 1).fill()
-  image.unlockFocus()
-  return NSCursor(image: image, hotSpot: .zero)
-}()
-
 // full-coverage view that participates in hit testing and swallows all mouse events
 class AbsorberView: NSView {
   // CGDisplayHideCursor takes the pointer away, but it does not keep it away: whatever app owns the
@@ -69,6 +59,18 @@ class AbsorberView: NSView {
   // the move the way the Windows shield answers WM_SETCURSOR, with a cursor that has nothing in it.
   // .activeAlways is what makes that work from a background app that never becomes frontmost.
   var hidesCursor = false
+
+  // a 1x1 fully transparent cursor — nothing to draw, drawn wherever the pointer is. a static on the
+  // type rather than a file-scope global: main.swift initializes those eagerly in source order, which
+  // would build the image before NSApplication.shared exists.
+  static let invisibleCursor: NSCursor = {
+    let image = NSImage(size: NSSize(width: 1, height: 1))
+    image.lockFocus()
+    NSColor.clear.setFill()
+    NSRect(x: 0, y: 0, width: 1, height: 1).fill()
+    image.unlockFocus()
+    return NSCursor(image: image, hotSpot: .zero)
+  }()
 
   override var acceptsFirstResponder: Bool { true }
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -88,7 +90,7 @@ class AbsorberView: NSView {
   // covers every other case, which is the usual one.
   override func resetCursorRects() {
     guard hidesCursor else { return super.resetCursorRects() }
-    addCursorRect(bounds, cursor: invisibleCursor)
+    addCursorRect(bounds, cursor: AbsorberView.invisibleCursor)
   }
 
   override func cursorUpdate(with event: NSEvent) { applyCursor() }
@@ -101,7 +103,7 @@ class AbsorberView: NSView {
 
   private func applyCursor() {
     guard hidesCursor else { return }
-    invisibleCursor.set()
+    AbsorberView.invisibleCursor.set()
   }
 }
 
@@ -326,6 +328,19 @@ class ShieldDelegate: NSObject, NSApplicationDelegate, CLLocationManagerDelegate
       w.alphaValue = 0.01
       w.ignoresMouseEvents = true
     }
+    // debug mode is the one case where the pointer should stay visible over the shield — the whole
+    // point of it is seeing where the pointer went.
+    applyCursorHiding(w, hide: absorb && !debugMode)
+  }
+
+  // the shield only draws the empty cursor while it is absorbing. on the way back out the pointer is
+  // handed to whichever app is underneath, which sets its own cursor on the next move — but a pointer
+  // that has not moved yet would keep wearing the empty one, so put the arrow back explicitly.
+  private func applyCursorHiding(_ w: NSWindow, hide: Bool) {
+    guard let view = w.contentView as? AbsorberView, view.hidesCursor != hide else { return }
+    view.hidesCursor = hide
+    w.invalidateCursorRects(for: view)
+    if hide { AbsorberView.invisibleCursor.set() } else { NSCursor.arrow.set() }
   }
 
   // cover the full screen that currently contains the cursor, so local hover is absorbed on whichever
