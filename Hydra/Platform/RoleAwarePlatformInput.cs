@@ -1,6 +1,7 @@
 using Hydra.Config;
 using Hydra.Keyboard;
 using Hydra.Mouse;
+using Microsoft.Extensions.Logging;
 
 namespace Hydra.Platform;
 
@@ -18,7 +19,8 @@ namespace Hydra.Platform;
 //
 // The event tap is not part of the choice. It is installed once and stays: the controller routes
 // from it, and a follower still watches it to notice the user is sitting at this machine.
-internal sealed class RoleAwarePlatformInput(IHydraProfile profile, IPlatformInput handler, ICursor cursor)
+internal sealed class RoleAwarePlatformInput(
+    IHydraProfile profile, IPlatformInput handler, ICursor cursor, ILogger<RoleAwarePlatformInput> log)
     : IPlatformInput
 {
     private ICursor Steering => profile.IsController ? handler : cursor;
@@ -39,10 +41,30 @@ internal sealed class RoleAwarePlatformInput(IHydraProfile profile, IPlatformInp
     // only the show follows the hide.
     private ICursor? _hiddenBy;
 
+    // Swallowing local input is a promise to forward it somewhere, and only the computer holding
+    // the keyboard can keep that promise. A computer that is following and swallowing is a computer
+    // with no keyboard and no mouse — which from the chair is indistinguishable from a hung machine,
+    // and there is nothing on screen to say otherwise.
+    //
+    // So the promise is refused here rather than trusted to every caller that makes it. There are
+    // several, they run on every computer now that both halves do, and each is a place this can go
+    // wrong: the screensaver coming off, a remote-only computer re-entering, an edge crossing
+    // resolved a moment after the role changed underneath it. The refusal is logged because a
+    // silent one would leave the same mystery, one layer down.
     public bool IsOnVirtualScreen
     {
         get => handler.IsOnVirtualScreen;
-        set => handler.IsOnVirtualScreen = value;
+        set
+        {
+            if (value && !profile.IsController)
+            {
+                log.LogWarning("Refused to swallow local input: this computer is following {Host}, not driving it",
+                    profile.Controller ?? "another computer");
+                handler.IsOnVirtualScreen = false;
+                return;
+            }
+            handler.IsOnVirtualScreen = value;
+        }
     }
 
     public ValueTask HideCursor()

@@ -82,6 +82,7 @@ public sealed class MacOutputHandler : IPlatformOutput, ICursor
 
         var eventRef = NativeMethods.CGEventCreateMouseEvent(nint.Zero, move.EventType, pos, move.Button);
         if (eventRef == nint.Zero) return;
+        SetDraggedButtonNumber(eventRef, move);
         NativeMethods.CGEventSetIntegerValueField(eventRef, NativeMethods.KCGMouseEventClickState, _clickState);
         NativeMethods.CGEventSetFlags(eventRef, _modifierFlags);
         // delta fields needed for drag operations (e.g. screenshot overlay resize)
@@ -114,6 +115,7 @@ public sealed class MacOutputHandler : IPlatformOutput, ICursor
 
         var eventRef = NativeMethods.CGEventCreateMouseEvent(nint.Zero, move.EventType, pos, move.Button);
         if (eventRef == nint.Zero) return;
+        SetDraggedButtonNumber(eventRef, move);
         NativeMethods.CGEventSetIntegerValueField(eventRef, NativeMethods.KCGMouseEventClickState, _clickState);
         NativeMethods.CGEventSetFlags(eventRef, _modifierFlags);
         // set integer AND double delta fields — some 3D apps/games read the double variant (barrier comment)
@@ -656,6 +658,19 @@ public sealed class MacOutputHandler : IPlatformOutput, ICursor
             _lastSingleClickX = _mouseX;
             _lastSingleClickY = _mouseY;
         }
+    }
+
+    // A drag by the middle button — or any button past the second — has to say which button it is
+    // in the event's own field. CGEventCreateMouseEvent takes the button as an argument and the
+    // documentation says it is honoured for the "other" mouse events, but it is not enough on its
+    // own: InjectMouseButton has always set the field explicitly for exactly these buttons, and the
+    // drag was the one place that did not. So the press arrived as button 2 and every move that
+    // followed arrived as button 0 — the click registered, and holding it and dragging did nothing,
+    // which is what middle-drag scrolling is made of.
+    private static void SetDraggedButtonNumber(nint eventRef, MoveEvent move)
+    {
+        if (move.EventType != NativeMethods.KCGEventOtherMouseDragged) return;
+        NativeMethods.CGEventSetIntegerValueField(eventRef, NativeMethods.KCGMouseEventButtonNumber, move.Button);
     }
 
     // drag event type when a button is held, otherwise plain moved

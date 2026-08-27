@@ -2,6 +2,7 @@ using Hydra.Config;
 using Hydra.Keyboard;
 using Hydra.Mouse;
 using Hydra.Platform;
+using Microsoft.Extensions.Logging.Abstractions;
 using NUnit.Framework;
 using Tests.Setup;
 
@@ -23,7 +24,39 @@ public class RoleAwarePlatformInputTests
         });
         var handler = new RecordingCursor();
         var output = new RecordingCursor();
-        return (new RoleAwarePlatformInput(profile, new StubInput(handler), output), handler, output, profile);
+        return (new RoleAwarePlatformInput(profile, new StubInput(handler), output,
+            NullLogger<RoleAwarePlatformInput>.Instance), handler, output, profile);
+    }
+
+    // -- swallowing local input --
+
+    [Test]
+    public void TheComputerHoldingTheKeyboardMaySwallowItsOwnInput()
+    {
+        var (input, _, _, profile) = Build();
+        profile.ApplyController("mac");
+
+        input.IsOnVirtualScreen = true;
+
+        Assert.That(input.IsOnVirtualScreen, Is.True,
+            "the controller swallows its local input precisely because it is forwarding it");
+    }
+
+    [Test]
+    public void AComputerThatIsFollowingRefusesToSwallowItsOwnInput()
+    {
+        // A computer that is following and swallowing has no keyboard and no mouse, and from the
+        // chair there is nothing to tell that from a hung machine. Several paths set this and they
+        // run on every computer now that both halves do — the screensaver coming off, a remote-only
+        // computer re-entering, an edge crossing resolved just after the role changed underneath it
+        // — so it is refused here rather than trusted to each of them in turn.
+        var (input, _, _, profile) = Build();
+        profile.ApplyController("pc");
+
+        input.IsOnVirtualScreen = true;
+
+        Assert.That(input.IsOnVirtualScreen, Is.False,
+            "swallowing local input is a promise to forward it, and only the controller keeps it");
     }
 
     [Test]
