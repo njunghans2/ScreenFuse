@@ -318,7 +318,22 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
     private static async Task<DisplayCommandResult> SetDisplayPowerCoreAsync(bool wake, CancellationToken cancellationToken)
     {
         if (OperatingSystem.IsWindows())
-            return WindowsDdc.SetAllDisplayPower(wake);
+        {
+            var powered = WindowsDdc.SetAllDisplayPower(wake);
+            if (!wake) return powered;
+
+            // Waking the panels is only half of it. A monitor that changed hands leaves Windows on
+            // "Show only on 1", and every display still attached stays dark however awake it is —
+            // the DDC power command reaches the monitor, and Windows is the one not rendering.
+            // Extend only when something attached is actually off: extending rearranges windows,
+            // which is not a thing to do to someone who did not need it.
+            if (!WindowsDisplayTopology.HasAttachedDisplayThatIsNotOn()) return powered;
+
+            var (extended, detail) = WindowsDisplayTopology.ExtendAll();
+            return new DisplayCommandResult("wake displays", extended || powered.Success,
+                extended ? $"{powered.Detail} Reconnected the displays Windows had dropped: {detail}."
+                    : $"{powered.Detail} A display is attached but not on, and the desktop could not be extended: {detail}.");
+        }
         if (OperatingSystem.IsMacOS())
         {
             if (!wake)

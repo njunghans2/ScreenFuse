@@ -39,6 +39,17 @@ public class DeskMonitorConfig
     // this state until a switch brings another display (or itself) back.
     public bool Sleeping { get; init; }
 
+    // True for a monitor that does not implement input select (VCP 0x60) at all. It still changes
+    // computers — it just does it the only way it can: the computer showing it stops driving, and
+    // the monitor's own input detection settles on the one that still is. There is no command to
+    // send it and no input to read back, so the desk stops trying both.
+    //
+    // Older panels are like this and answer DDC perfectly well otherwise: a BenQ XL2420T reports
+    // its luminance and contrast, and returns 0x60 itself when asked what input it is on. Trying to
+    // switch such a monitor by DDC is silent and total failure — every command is accepted and
+    // nothing happens — which reads as an intermittent fault for as long as it takes to notice.
+    public bool FollowsTheSignal { get; init; }
+
     public MonitorSourceConfig? Source(string host) => Sources.FirstOrDefault(s => s.Host.EqualsIgnoreCase(host));
 
     // Not a property: a computed property would be serialised into the config file as a field
@@ -50,7 +61,7 @@ public class DeskMonitorConfig
     public DeskMonitorConfig With(
         string? label = null, int? deskX = null, int? deskY = null,
         int? width = null, int? height = null, List<MonitorSourceConfig>? sources = null,
-        bool? sleeping = null) => new()
+        bool? sleeping = null, bool? followsTheSignal = null) => new()
     {
         Id = Id,
         Label = label ?? Label,
@@ -61,6 +72,7 @@ public class DeskMonitorConfig
         Height = height ?? Height,
         Sources = sources ?? Sources,
         Sleeping = sleeping ?? Sleeping,
+        FollowsTheSignal = followsTheSignal ?? FollowsTheSignal,
     };
 }
 

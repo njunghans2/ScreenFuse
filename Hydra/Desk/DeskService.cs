@@ -429,8 +429,19 @@ public sealed class DeskService : SimpleHostedService, IDeskService
     }
 
 
+    // The sockets a computer is actually wired on, most likely first. The rest of the MCCS 0x60
+    // table — composite, S-video, tuner, component — is deliberately left out: nothing with a
+    // keyboard is on the other end of those, and every code tried costs the monitor a real switch.
+    private static readonly int[] StandardInputs = [0x0F, 0x11, 0x03, 0x10, 0x12, 0x04, 0x01];
+
     // Codes worth trying: the ones the monitor admits to, minus any already spoken for by another
     // computer. Trying a code someone else owns can only ever prove what is already known.
+    //
+    // A monitor that admits to nothing still gets tried. Plenty of panels publish no capabilities
+    // string, or publish one with no value list for 0x60 — the BenQ XL2420T is one — and reading
+    // that as "no codes to try" made the one monitor that most needed discovering the one monitor
+    // that could never be discovered. There is nothing to lose by trying the standard sockets: a
+    // code the monitor does not have is refused or ignored, and the switch is reverted either way.
     private static List<int> Candidates(DeskMonitorConfig monitor, string host)
     {
         var taken = monitor.Sources
@@ -438,11 +449,9 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             .Select(s => s.Input!.Value)
             .ToHashSet();
 
-        return [.. monitor.Sources
-            .SelectMany(s => s.AvailableInputs)
-            .Distinct()
-            .Where(i => !taken.Contains(i))
-            .OrderBy(i => i)];
+        var published = monitor.Sources.SelectMany(s => s.AvailableInputs).Distinct().OrderBy(i => i).ToList();
+        IEnumerable<int> offered = published.Count > 0 ? published : StandardInputs;
+        return [.. offered.Where(i => !taken.Contains(i))];
     }
 
     private async Task RevertAsync(string owner, string ddcId, int? original)
@@ -543,8 +552,23 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         var ddcId = owner == null ? null : monitor.Source(owner)?.DdcId;
         var target = monitor.Source(host);
 
+        // A monitor with no input select of its own changes computers by following the signal, so
+        // the release *is* the switch: wake the computer it is going to, put its display back on
+        // the desktop, then take the signal away from the one that has it and let the monitor find
+        // the other. There is no command to send and no input to read back, so none is attempted —
+        // every DDC command such a monitor is sent is accepted and silently does nothing, which is
+        // indistinguishable from an intermittent fault until you know to stop trying.
+        var bySignal = monitor.FollowsTheSignal && !string.IsNullOrWhiteSpace(owner);
+
         DeskActionResult result;
-        if (!string.IsNullOrWhiteSpace(owner) && !string.IsNullOrWhiteSpace(ddcId))
+        if (bySignal)
+        {
+            await WakeForSwitchAsync(host, cancel);
+            await PrepareGainingDisplayAsync(monitor, host, cancel);
+            await ReleaseLosingDisplaysAsync(monitor, host, cancel);
+            result = DeskActionResult.Ok($"{monitor.DisplayName()} switched to {host}.");
+        }
+        else if (!string.IsNullOrWhiteSpace(owner) && !string.IsNullOrWhiteSpace(ddcId))
         {
             // Wake the computer we are switching *to* first, and give it a moment.
             //
@@ -573,6 +597,22 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             }
         }
         else result = ExplainSwitchGap(monitor, owner, host, null);
+
+        // DDC could not move it. Before giving up, try the only other way a monitor changes
+        // computers: take the signal away from the one that has it and let the monitor find the
+        // one still driving. This is where a monitor with no input select is actually discovered —
+        // it accepts every command and ignores all of them, so the failure above is not evidence of
+        // anything being wrong, and refusing here meant the computer losing the monitor was never
+        // released. The user saw the gaining Mac light up its display and the monitor stay put.
+        if (!result.Accepted && !bySignal && !string.IsNullOrWhiteSpace(owner))
+        {
+            _log.LogInformation("{Monitor} would not switch by DDC ({Why}) — handing it over by dropping {Owner}'s signal instead",
+                monitor.DisplayName(), result.Message, owner);
+            await ReleaseLosingDisplaysAsync(monitor, host, cancel);
+            bySignal = true;
+            result = DeskActionResult.Ok($"{monitor.DisplayName()} switched to {host}.");
+        }
+
         if (!result.Accepted) return result;
 
         // The user's choice lands on the desk right away: the optimistic assignment and the state
@@ -594,7 +634,9 @@ var held = true;
         if (!host.Equals(LocalName, StringComparison.OrdinalIgnoreCase))
         {
             await WaitForScreenAsync(host, monitor, cancel);
-            if (target?.Input is { } input)
+            // Nothing to re-assert on a monitor that follows the signal, and nothing to read back:
+            // asking it what input it is on is the very question it cannot answer.
+            if (!bySignal && target?.Input is { } input)
                 held = await EnsureSwitchHeldAsync(owner!, ddcId!, monitor, host, input, cancel);
         }
 
@@ -628,7 +670,8 @@ var held = true;
         // living on the invisible panel. The gaining side was seen to before the switch; this is
         // the losers, and it deliberately runs after the hold loop above: dropping a display takes
         // its DDC channel with it, and the loser is the computer that commands this monitor.
-        await ReleaseLosingDisplaysAsync(monitor, host, cancel);
+        // A monitor that follows the signal was released up front — that release was the switch.
+        if (!bySignal) await ReleaseLosingDisplaysAsync(monitor, host, cancel);
 
 // The monitor now belongs to someone else, so the pointer crosses somewhere else. Derived
         // and handed over now rather than at the next round: waiting meant the crossings stayed
@@ -725,9 +768,21 @@ var rebuilt = RebuildHosts(_config);
             {
                 if (handedOver)
                 {
-                    var result = await _router.SetDisplayPowerAsync(wake: false, cancel);
-                    _log.LogInformation("Last display for {Host}: stopped this computer's output instead of disabling {DdcId} ({Success} {Detail})",
-                        LocalName, source.DdcId, result.Success, result.Detail);
+                    // Try the real thing first: a display taken off the desktop stops driving *and*
+                    // stops windows and the pointer living on a panel that is not there. Windows
+                    // refuses to remove a computer's last active display, and stopping the output
+                    // is the whole of what can be done there. macOS accepts it, which is what the
+                    // desk wants — and the wake on the way back reconnects it.
+                    var released = await _router.SetMonitorDisplayEnabledAsync(source.DdcId, enabled: false, cancel);
+                    if (!released.Success)
+                    {
+                        var slept = await _router.SetDisplayPowerAsync(wake: false, cancel);
+                        _log.LogInformation("Last display for {Host}: {DdcId} would not be released ({Detail}), so the output was stopped instead ({Slept})",
+                            LocalName, source.DdcId, released.Detail, slept.Success);
+                    }
+                    else
+                        _log.LogInformation("Last display for {Host}: released {DdcId} — {Detail}",
+                            LocalName, source.DdcId, released.Detail);
                 }
                 else
                 {
@@ -748,9 +803,15 @@ var rebuilt = RebuildHosts(_config);
             {
                 if (handedOver)
                 {
+                    // Both, in that order, because a peer answers neither: the release is what the
+                    // desk wants and the computer that cannot do it refuses harmlessly, and the
+                    // output stop is what is left for that computer. On one that released the
+                    // display there is nothing left to stop, so it costs nothing either.
+                    Send([source.Host], MessageSerializer.Encode(MessageKind.SetMonitorDisplay,
+                        new SetMonitorDisplayMessage(source.DdcId, Enabled: false)));
                     Send([source.Host], MessageSerializer.Encode(MessageKind.DeskDisplayPower,
                         new DeskDisplayPowerMessage(Guid.NewGuid().ToString("N"), Wake: false)));
-                    _log.LogInformation("Asked {Host} to stop its output — {DdcId} was its last display", source.Host, source.DdcId);
+                    _log.LogInformation("Asked {Host} to release {DdcId} and stop its output — it was its last display", source.Host, source.DdcId);
                 }
                 else
                 {
@@ -1631,7 +1692,7 @@ var rebuilt = RebuildHosts(_config);
         {
             var loaded = _store.Load();
             _configUnreadable = false;
-            return loaded;
+            return ForgetImplausibleInputs(loaded);
         }
         catch (Exception ex)
         {
@@ -1641,6 +1702,35 @@ var rebuilt = RebuildHosts(_config);
                 + "until this is fixed", _store.Path);
             return new HydraConfigFile();
         }
+    }
+
+    // Drops stored input codes that no input can have. A wrong code is believed indefinitely — the
+    // desk only ever learns one when it has no code yet — so a bad reading that got written down
+    // once is permanent, and every switch to that computer sends the panel to a socket nothing
+    // drives. Forgetting the code puts the monitor back where it started: the desk does not know
+    // the wiring, and will learn it the next time it can watch the input change.
+    private HydraConfigFile ForgetImplausibleInputs(HydraConfigFile file)
+    {
+        static bool Implausible(MonitorSourceConfig s) => s.Input is { } i && !DeskMerge.PlausibleInput(i);
+
+        var forgotten = file.Monitors
+            .SelectMany(m => m.Sources.Where(Implausible).Select(s => $"{m.DisplayName()}/{s.Host}={s.Input}"))
+            .ToList();
+        if (forgotten.Count == 0) return file;
+
+        _log.LogWarning("Forgot {Count} stored input code(s) no input can have: {Codes}. ScreenFuse will "
+            + "learn the real one the next time it can watch that monitor change input.",
+            forgotten.Count, string.Join(", ", forgotten));
+
+        return WithMonitors(file, file.Monitors
+            .Select(m => !m.Sources.Any(Implausible) ? m : m.With(sources: m.Sources
+                .Select(s => !Implausible(s) ? s : new MonitorSourceConfig
+                {
+                    Host = s.Host, Input = null, AvailableInputs = s.AvailableInputs,
+                    DdcId = s.DdcId, ScreenId = s.ScreenId,
+                })
+                .ToList()))
+            .ToList());
     }
 
     // Set while the document on disk could not be read. Everything else carries on; only writing is

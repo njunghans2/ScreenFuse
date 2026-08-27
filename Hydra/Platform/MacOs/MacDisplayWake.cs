@@ -98,10 +98,16 @@ internal static class MacDisplayWake
     {
         if (Configure == null) return false;
         var record = LoadRemembered().Values.FirstOrDefault(r => r.Uuid.Equals(uuid, StringComparison.OrdinalIgnoreCase));
-        if (record == null) return false;
         // The current display id wins over the remembered one: ids shift when a display is
         // disabled and re-enabled, and configuring the stale id is refused by the window server.
         var live = OnlineRecords().FirstOrDefault(d => d.Uuid.Equals(uuid, StringComparison.OrdinalIgnoreCase));
+
+        // The store is what lets a display that has *vanished* be found again, so a display still
+        // in front of us needs nothing from it. Requiring the record anyway meant the first
+        // disconnect of a display this Mac had never woken was refused outright — the monitor
+        // changed hands and macOS went on driving a panel nobody was looking at.
+        record ??= live;
+        if (record == null) return false;
 
         // A display that is already driving is left alone. The switch's hold loop asks for this
         // every few hundred milliseconds — the monitor's hot-plug blip can drop the display at any

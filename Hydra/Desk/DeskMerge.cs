@@ -123,6 +123,7 @@ public static class DeskMerge
             var (host, learned) = Resolve(monitor, monitorClaims);
             if (host != null) active[monitor.Id] = host;
             if (learned != null) changed |= monitor.Learn(learned.Value.Host, learned.Value.Input);
+            changed |= monitor.NoteSignalFollowing(monitorClaims);
         }
 
         changed |= Place(working, active);
@@ -181,10 +182,11 @@ public static class DeskMerge
         // A reading the monitor itself does not admit to is not a reading — helpers misresolve
         // displays (m1ddc answers the built-in's code for a different panel's UUID) and a monitor
         // mid-scan reports inputs it does not have. Trust a VCP value only when it is one of the
-        // monitor's known codes, or when nothing is known about its codes at all.
+        // monitor's known codes, or — when nothing is known about its codes — when it is at least
+        // a code an input could have.
         var knownInputs = monitor.Sources.SelectMany(s => s.AvailableInputs).Distinct().ToList();
-        var readings = claims.Where(c => c.ViaDdc && c.CurrentInput is >= 0 and <= 255
-            && (knownInputs.Count == 0 || knownInputs.Contains(c.CurrentInput.Value))).ToList();
+        var readings = claims.Where(c => c.ViaDdc && c.CurrentInput is { } value
+            && (knownInputs.Count == 0 ? PlausibleInput(value) : knownInputs.Contains(value))).ToList();
 
         // Nothing readable — a panel that answers no DDC, or a helper that is missing. Whoever is
         // here is the best answer there is, and with one computer it is a certain one.
@@ -259,8 +261,18 @@ public static class DeskMerge
     private static bool Supported(Builder monitor, int input)
     {
         var known = monitor.Sources.SelectMany(s => s.AvailableInputs).Distinct().ToList();
-        return known.Count == 0 || known.Contains(input);
+        return known.Count == 0 ? PlausibleInput(input) : known.Contains(input);
     }
+
+    // MCCS gives VCP 0x60 the values 0x01–0x12: the two VGAs, the two DVIs, composite, S-video,
+    // tuner, component, the two DisplayPorts and the two HDMIs. Anything outside that is not an
+    // input, and when a monitor has published no capabilities string there is nothing else to check
+    // a reading against — which is how a helper answering the same number for every display it is
+    // asked about got that number written down as a real socket. m1ddc returns 96 — 0x60, the code
+    // itself — for a UUID it cannot resolve, so one Mac learned "input 96" for its built-in panel
+    // and for the BenQ beside it, and switching either one to 96 selects nothing: the panel goes
+    // grey, and the desk believes the code indefinitely because a wrong code cannot be re-derived.
+    internal static bool PlausibleInput(int input) => input is >= 0x01 and <= 0x12;
 
     // -- identity --------------------------------------------------------------------------------
 
@@ -585,6 +597,7 @@ public static class DeskMerge
         public int ScreenX { get; set; }
         public int ScreenY { get; set; }
         public bool Sleeping { get; set; }
+        public bool FollowsTheSignal { get; set; }
         public List<Source> Sources { get; } = [];
 
         public static Builder From(DeskMonitorConfig config)
@@ -599,6 +612,7 @@ public static class DeskMerge
                 Height = config.Height,
                 Placed = config.Width > 0,
                 Sleeping = config.Sleeping,
+                FollowsTheSignal = config.FollowsTheSignal,
             };
             // Older desks stored no aliases; the label is the only name they knew it by.
             builder.Aliases.AddRange(config.Aliases.Count > 0 ? config.Aliases : [config.Label ?? config.Id]);
@@ -617,6 +631,7 @@ public static class DeskMerge
                 if (!Aliases.Any(a => string.Equals(a, alias, StringComparison.OrdinalIgnoreCase))) Aliases.Add(alias);
             if (DeskMerge.BestLabel(Aliases) is { } better) Label = better;
             if (Width <= 0) { Width = other.Width; Height = other.Height; }
+            FollowsTheSignal |= other.FollowsTheSignal;
             if (!Placed && other.Placed) { DeskX = other.DeskX; DeskY = other.DeskY; Placed = true; }
 
             foreach (var source in other.Sources)
@@ -628,6 +643,30 @@ public static class DeskMerge
                 mine.ScreenId ??= source.ScreenId;
                 if (mine.AvailableInputs.Count == 0) mine.AvailableInputs = source.AvailableInputs;
             }
+        }
+
+        // A computer driving this panel *and* able to talk DDC to it is looking at its own input, so
+        // the monitor can name the code that selects it. One that answers something no input could
+        // be is saying it does not implement input select at all: a BenQ XL2420T reports its
+        // luminance and contrast happily and returns 0x60 itself when asked what it is on.
+        //
+        // Only that pairing is evidence. A reading from a computer that is not on screen proves
+        // nothing, and neither does silence. Re-derived every round rather than latched, so one
+        // bad reading cannot condemn a monitor to the slow path forever.
+        public bool NoteSignalFollowing(List<Claim> claims)
+        {
+            var witnesses = claims.Where(c => c.ViaDdc && c.ViaScreen).ToList();
+            if (witnesses.Count == 0) return false;
+
+            // No usable answer is the same answer however it arrives. The two helpers fail
+            // differently — m1ddc hands back 0x60 itself, and Windows' GetVCPFeature simply says
+            // no, which reaches here as nothing at all — so accepting only the junk value meant
+            // this was detectable from a Mac and invisible from the PC. That is how the panel with
+            // no DDC hardware got recognised while the monitor it was sat next to did not.
+            var follows = witnesses.All(c => c.CurrentInput is not { } value || !PlausibleInput(value));
+            if (follows == FollowsTheSignal) return false;
+            FollowsTheSignal = follows;
+            return true;
         }
 
         public bool Learn(string host, int input)
@@ -685,6 +724,7 @@ public static class DeskMerge
             Width = Width,
             Height = Height,
             Sleeping = Sleeping,
+            FollowsTheSignal = FollowsTheSignal,
             Sources = Sources.Select(s => new MonitorSourceConfig
             {
                 Host = s.Host, Input = s.Input, DdcId = s.DdcId, ScreenId = s.ScreenId,

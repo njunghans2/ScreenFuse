@@ -108,10 +108,42 @@ internal static class WindowsDisplayTopology
             return (ok, ok ? $"restored {gdiDeviceName} at its previous position" : detail);
         }
 
-        // No saved config (the app restarted between disable and enable, or the display was disabled
-        // by another tool): the removed path cannot be reconstructed reliably from the current query
-        // — say so plainly instead of pretending.
-        return (false, $"{gdiDeviceName} was not disabled by this session, so its previous configuration is unknown — re-enable it in Windows display settings or reboot.");
+        // No saved config: the app restarted between the disable and the enable, or something
+        // else took the display off the desktop — Windows itself does, dropping to "Show only on 1"
+        // when a monitor changes hands. The removed path cannot be reconstructed from the current
+        // query, but it does not have to be: asking Windows to extend across everything attached
+        // brings the panel back, which is the whole of what was wanted. Position and resolution are
+        // Windows' choice rather than the one it had, and that is worth saying.
+        var (extended, why) = ExtendAll();
+        return extended
+            ? (true, $"{gdiDeviceName} was not disabled by this session, so the desktop was extended across every attached display instead — Windows chose its position.")
+            : (false, $"{gdiDeviceName} was not disabled by this session and the desktop could not be extended ({why}) — re-enable it in Windows display settings or reboot.");
+    }
+
+    // "Extend these displays", as the Win+P menu means it.
+    //
+    // Windows drops the desktop to a single display when the monitor a path was driving changes
+    // hands, and nothing about a monitor's power state brings it back: the panel is awake and
+    // showing this computer, and Windows is simply not rendering to it. Only a topology change
+    // does, and this is that change. Path and mode arrays must be null with the topology flags —
+    // the whole point is that Windows works the arrangement out itself.
+    internal static unsafe (bool Success, string Detail) ExtendAll()
+    {
+        var result = SetDisplayConfig(0, null, 0, null, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
+        return (result == ERROR_SUCCESS,
+            result == ERROR_SUCCESS ? "extended the desktop across every attached display"
+                : $"SetDisplayConfig(TOPOLOGY_EXTEND) returned {result} (last error {Marshal.GetLastWin32Error()})");
+    }
+
+    // Whether something is plugged in that the desktop is not using. Extending is not free — it
+    // repositions windows — so it is worth knowing there is a reason before doing it. Comparing the
+    // two path queries is enough: every path Windows could light up against the ones it has.
+    internal static unsafe bool HasAttachedDisplayThatIsNotOn()
+    {
+        uint allPaths = 0, allModes = 0, activePaths = 0, activeModes = 0;
+        if (GetDisplayConfigBufferSizes(QDC_ALL_PATHS, &allPaths, &allModes) != ERROR_SUCCESS) return false;
+        if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &activePaths, &activeModes) != ERROR_SUCCESS) return false;
+        return allPaths > activePaths;
     }
 
     private static unsafe bool QueryActivePaths(out DISPLAYCONFIG_PATH_INFO[] paths, out byte[] modes)
@@ -210,10 +242,12 @@ internal static class WindowsDisplayTopology
     }
 
     private const uint ERROR_SUCCESS = 0;
+    private const uint QDC_ALL_PATHS = 1;
     private const uint QDC_ONLY_ACTIVE_PATHS = 2;
     private const uint SDC_APPLY = 0x00000080;
     private const uint SDC_USE_SUPPLIED_DISPLAY_CONFIG = 0x00000020;
     private const uint SDC_ALLOW_CHANGES = 0x00000400;
+    private const uint SDC_TOPOLOGY_EXTEND = 0x00000004;
     private const uint DISPLAYCONFIG_PATH_ACTIVE = 1;
     private const uint DISPLAYCONFIG_PATH_MODE_IDX_INVALID = 0xFFFFFFFF;
     private const int DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME = 1;
