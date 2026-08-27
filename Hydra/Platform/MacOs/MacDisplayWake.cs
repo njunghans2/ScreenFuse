@@ -82,6 +82,12 @@ internal static class MacDisplayWake
         return reconnected;
     }
 
+    // Whether this computer is driving anything at all. The blanket reconnect below is a rescue for
+    // a Mac left with nothing to render on, and only that: a Mac that still has a display needs no
+    // rescuing, and reconnecting every display it ever dropped takes back the ones the desk had
+    // deliberately released to another computer.
+    internal static bool HasActiveDisplay() => ActiveDisplayIds().Count > 0;
+
     private static unsafe List<uint> ActiveDisplayIds()
     {
         const uint max = 32;

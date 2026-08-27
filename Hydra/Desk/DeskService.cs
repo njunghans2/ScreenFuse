@@ -743,26 +743,25 @@ var rebuilt = RebuildHosts(_config);
             if (source.Host.Equals(gainingHost, StringComparison.OrdinalIgnoreCase)) continue;
             if (string.IsNullOrWhiteSpace(source.DdcId)) continue;
 
-            // What would stay on this host after the switch. Two special cases, and they are the
-            // point of this method's existence:
-            //  - nothing would stay: the switched monitor is its last display, and the host stops
-            //    its output rather than remove it — an OS with no display to render is soft-locked;
-            //  - only unswitchable displays would stay (a laptop panel wired to nothing else): those
-            //    keep the host alive, and they too are blanked rather than left lit — the user asked
-            //    for the computer to be off.
+            // Only the monitor that changed hands is released. A computer keeping a display that
+            // cannot be switched — a laptop panel wired to nothing else — used to have it blanked
+            // too, on the reasoning that the user had asked for that computer to be off. They had
+            // not: they asked for one monitor to move. Handing the BenQ back to the PC put the
+            // MacBook's own screen to sleep, and because a slept monitor is no longer a crossing,
+            // it took the pointer's way onto the Mac with it.
+            //
+            // The macOS blank made it worse than a mistake of judgement. There is no per-panel DDC
+            // there, so it runs `pmset displaysleepnow` — every display on the machine, whatever
+            // the desk had picked out.
             var remaining = _snapshot.Monitors.Where(v =>
                 string.Equals(v.ActiveHost, source.Host, StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(v.Id, monitor.Id, StringComparison.OrdinalIgnoreCase)).ToList();
-            var blank = remaining.Count == 0
-                ? new[] { monitor }
-                : remaining.All(v => v.Sources.Count <= 1) ? remaining.Select(v => _config.Monitors.FirstOrDefault(m => m.Id == v.Id)!).Where(m => m != null).ToArray() : [];
 
-            // The monitor that just changed hands is never blanked with DDC. A panel's power state
-            // belongs to the panel, not to one of the computers wired to it: telling it to stand by
-            // blacks it out for the computer that just won it, on a switch that worked. Stopping
-            // this computer's own video output is what was meant, and it is a different call.
-            var handedOver = blank.Any(b => b.Id == monitor.Id);
-            var keeps = blank.Where(b => b.Id != monitor.Id).ToList();
+            // Nothing would be left to render on: the display cannot be removed, so the computer's
+            // output is stopped instead. A panel's power state belongs to the panel and not to one
+            // of the computers wired to it, so the monitor that just changed hands is never sent a
+            // DDC blank — that blacks it out for the computer that has just won it.
+            var handedOver = remaining.Count == 0;
 
             if (source.Host.Equals(LocalName, StringComparison.OrdinalIgnoreCase))
             {
@@ -790,14 +789,6 @@ var rebuilt = RebuildHosts(_config);
                     _log.LogInformation("Disabled local display {DdcId} for {Monitor}: {Success} {Detail}",
                         source.DdcId, monitor.DisplayName(), disabled.Success, disabled.Detail);
                 }
-                // The panels this computer keeps are its own — nobody else is looking at them — so
-                // those really are a standby. The remote branch always did this; the local one
-                // returned early and left them lit.
-                foreach (var keep in keeps)
-                {
-                    if (keep.Source(LocalName) is { DdcId: not null } keepSource)
-                        await _router.SetDisplayStandbyAsync(keepSource.DdcId, standby: true, cancel);
-                }
             }
             else if (_peers.Contains(source.Host, StringComparer.OrdinalIgnoreCase))
             {
@@ -820,16 +811,16 @@ var rebuilt = RebuildHosts(_config);
                     _log.LogInformation("Asked {Host} to disable its display {DdcId} for {Monitor}",
                         source.Host, source.DdcId, monitor.DisplayName());
                 }
-                foreach (var keep in keeps)
-                {
-                    if (keep.Source(source.Host) is { DdcId: not null } keepSource)
-                        Send([source.Host], MessageSerializer.Encode(MessageKind.SetMonitorStandby,
-                            new SetMonitorStandbyMessage(keepSource.DdcId, Standby: true)));
-                }
             }
             else continue;
 
-            foreach (var slept in blank) await MarkSleepingAsync(slept.Id);
+            // Nothing is recorded as asleep. The mark exists to cut the crossings to a panel nobody
+            // is driving, and it used to go on the monitor that had just changed hands — correct
+            // when that monitor's panel was being blanked, and wrong the moment it stopped being:
+            // the monitor is showing the computer that just won it. Marking it asleep cut the
+            // crossings to a live screen, which is how handing the AORUS to the Mac made the AORUS
+            // unreachable. What has no display now is the computer that gave it up, and a computer
+            // with no monitors on the desk is nowhere the pointer can be sent anyway.
         }
     }
 
@@ -1711,6 +1702,17 @@ var rebuilt = RebuildHosts(_config);
     // the wiring, and will learn it the next time it can watch the input change.
     private HydraConfigFile ForgetImplausibleInputs(HydraConfigFile file)
     {
+        // A desk written before monitors stopped being marked asleep can carry the mark on a
+        // monitor that is plainly lit, and the mark cuts every crossing through it. Nothing sets
+        // it any more, so any that survives is stale by definition.
+        if (file.Monitors.Any(m => m.Sleeping))
+        {
+            _log.LogWarning("Woke {Count} monitor(s) the desk still had marked asleep: {Monitors}",
+                file.Monitors.Count(m => m.Sleeping),
+                string.Join(", ", file.Monitors.Where(m => m.Sleeping).Select(m => m.DisplayName())));
+            file = WithMonitors(file, file.Monitors.Select(m => m.Sleeping ? m.With(sleeping: false) : m).ToList());
+        }
+
         static bool Implausible(MonitorSourceConfig s) => s.Input is { } i && !DeskMerge.PlausibleInput(i);
 
         var forgotten = file.Monitors

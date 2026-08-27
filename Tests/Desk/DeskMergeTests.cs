@@ -14,6 +14,43 @@ public class DeskMergeTests
             screens.Select(s => new DeskScreenReport(s.ScreenId, s.Output, s.DisplayName, s.X, s.Y, s.W, s.H)).ToList());
 
     [Test]
+    public void AScreenTheDisplayServerWillNotNameIsStillTheMonitorItIs()
+    {
+        // macOS names a screen from AppKit's screen list, which is refreshed off a run loop a
+        // background agent does not pump — so a display reconnected underneath it comes back with
+        // no name at all. CoreGraphics still lists it and the panel is plainly lit, but with the
+        // name gone there was nothing left to recognise it by: the monitor dropped out of the desk
+        // as an unidentifiable phantom, and every crossing that named it went nowhere.
+        //
+        // The output name is the answer, and on macOS it is the display's UUID: stable across a
+        // reconnect, a replug, and a display server in no mood to say what the panel is called.
+        var uuid = "12214163-3425-481C-87D3-ED793FFC4DAC";
+        var known = DeskMerge.Merge([], new Dictionary<string, DeskInventoryMessage>
+        {
+            ["mac"] = Inventory(
+                [(uuid, "AORUS FI27Q-X", 17)],
+                [("mac:1", uuid, "AORUS FI27Q-X", 0, 0, 2560, 1440)]),
+        }).Monitors;
+        Assert.That(known.Single().Label, Is.EqualTo("AORUS FI27Q-X"), "pre-condition: named to begin with");
+
+        // the same panel, the same UUID, and nothing willing to say its name
+        var merged = DeskMerge.Merge(known, new Dictionary<string, DeskInventoryMessage>
+        {
+            ["mac"] = Inventory(
+                [(uuid, "AORUS FI27Q-X", 17)],
+                [("mac:1", uuid, null, 0, 0, 2560, 1440)]),
+        });
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(merged.Monitors, Has.Count.EqualTo(1), "it is the monitor it always was, not a second one");
+            Assert.That(merged.Views.Single().ActiveHost, Is.EqualTo("mac"), "and the computer driving it still is");
+            Assert.That(merged.Monitors.Single().Source("mac")!.ScreenId, Is.EqualTo(uuid),
+                "identified by something that survives the name going missing");
+        }
+    }
+
+    [Test]
     public void LearnsTheInputCodeFromTheComputerLookingAtTheMonitor()
     {
         var reports = new Dictionary<string, DeskInventoryMessage>

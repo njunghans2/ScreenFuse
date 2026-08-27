@@ -375,9 +375,11 @@ public class TwoComputerDeskTests
                 "a monitor that has just changed hands must never be told to blank its panel");
             Assert.That(commands, Does.Contain("sleep"),
                 "so this computer stops driving its output instead");
+            // The computer that gave it up has no display left. The monitor is not asleep — it is
+            // showing the computer that just won it, and marking it so cut every crossing through
+            // a lit screen.
             var benq = desk.Windows.Snapshot.Monitors.Single(m => m.Id == desk.Benq);
-            Assert.That(benq.Sleeping, Is.True, "the desk records that the monitor is the blanked last display");
-            Assert.That(desk.Windows.Snapshot.Crossings, Is.Empty, "a black panel is not a crossing destination");
+            Assert.That(benq.Sleeping, Is.False, "a monitor showing the computer that won it is not asleep");
         }
     }
 
@@ -400,6 +402,32 @@ public class TwoComputerDeskTests
                 Is.Empty, "a monitor with no input select must not be sent input commands");
             Assert.That(desk.Windows.Router.Commands.Any(c => c is @"disable \\.\DISPLAY2" or "sleep"),
                 Is.True, "the computer showing it stops driving instead — that release is the switch");
+        }
+    }
+
+    [Test]
+    public async Task TakingAMonitorBackLeavesTheOtherComputersOwnScreenAlone()
+    {
+        // Handing the BenQ back to the PC put the MacBook's own screen to sleep with it. The desk
+        // reasoned that a computer left with only an unswitchable panel had been asked to be off —
+        // but the user asked for one monitor to move, not for the Mac to go dark. And because a
+        // slept monitor is not a crossing, it took the pointer's way onto the Mac with it.
+        using var desk = await Desk.ConvergedAsync();
+        await desk.SwitchAsync(desk.Benq, "Mac");
+        desk.Mac.Router.Commands.Clear();
+
+        await desk.SwitchAsync(desk.Benq, "NINOG");
+
+        var builtIn = desk.Windows.Snapshot.Monitors.Single(m => m.Id == desk.BuiltIn);
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(desk.Mac.Router.Commands.Any(c => c.StartsWith("blank", StringComparison.Ordinal) || c == "sleep"),
+                Is.False, "the computer losing the monitor keeps the screens it still has");
+            Assert.That(builtIn.Sleeping, Is.False, "and they stay awake on the desk");
+            var neighbours = desk.Windows.Config.Profiles.SelectMany(p => p.Hosts).SelectMany(h => h.Neighbours);
+            Assert.That(neighbours.Any(n => n.DestScreen != null
+                    && n.DestScreen.Contains("Built-in", StringComparison.OrdinalIgnoreCase)),
+                Is.True, "so the pointer can still reach the computer that gave the monitor up");
         }
     }
 

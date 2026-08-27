@@ -27,7 +27,14 @@ internal static class MacDisplayHelper
                 Width: (int)bounds.Size.X,
                 Height: (int)bounds.Size.Y,
                 DisplayName: name,
-                OutputName: null,
+                // The display's UUID, as the stable identifier every other platform gets from its
+                // output name. macOS had none, so a screen could only be recognised by the name
+                // AppKit gave it — and AppKit's screen list is refreshed from a run loop this
+                // background agent does not pump, so a display reconnected underneath it comes
+                // back nameless. CoreGraphics lists it, nothing can identify it, and every crossing
+                // that named it goes nowhere: the pointer stops at an edge with a monitor past it.
+                // The UUID survives that, and survives a replug, which the name never did either.
+                OutputName: NativeMethods.DisplayUuid(displayId),
                 PlatformId: displayId.ToString()));
         }
 

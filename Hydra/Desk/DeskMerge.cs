@@ -89,9 +89,15 @@ public static class DeskMerge
             foreach (var screen in screens.Where(s => !claimedScreens.Contains(s.ScreenId)))
             {
                 var aliases = Aliases(null, screen);
-                if (aliases.Count == 0) continue;
-                var entry = Find(working, host, null, ScreenKey(screen), aliases)
-                            ?? Create(working, aliases, ref changed);
+                var entry = Find(working, host, null, ScreenKey(screen), aliases);
+
+                // A nameless screen is not enough to invent a monitor from — a link flapping during
+                // a switch enumerates one for a moment — but it is enough to recognise one already
+                // on the desk, when the display server hands back an identifier that outlives the
+                // name. macOS stops naming a display it has just reconnected, and skipping it
+                // outright dropped a plainly lit panel off the desk along with its crossings.
+                if (entry == null && aliases.Count == 0) continue;
+                entry ??= Create(working, aliases, ref changed);
                 changed |= entry.Apply(host, null, ScreenKey(screen), aliases, screen, null);
                 Record(claims, entry.Id, new Claim(host, null, ViaDdc: false, ViaScreen: true));
             }

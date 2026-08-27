@@ -342,7 +342,15 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
             // A monitor that was put to sleep, or switched to the other computer, is gone from
             // macOS's display arrangement — `caffeinate` cannot bring it back, only re-enabling it
             // via CGSConfigureDisplayEnabled can. Do that first, then wake the system.
-            var reconnected = MacDisplayWake.WakeDisconnected();
+            //
+            // But only as a rescue, for a computer left with nothing to render on. This reconnects
+            // *every* display macOS ever dropped, which on a computer that still has one is not a
+            // wake but a land grab: switching one monitor here quietly took back every other
+            // monitor this computer had been released from, both computers then listed the same
+            // panel as their screen, and the desk handed it to whichever of them sorted first.
+            // The display for the monitor actually being switched is reconnected by name, by the
+            // desk, before the input moves — this does not have to guess at it.
+            var reconnected = MacDisplayWake.HasActiveDisplay() ? 0 : MacDisplayWake.WakeDisconnected();
             var caffeinated = await RunAsync("caffeinate", ["-u", "-t", "1"], "wake displays", cancellationToken);
             return reconnected > 0
                 ? new DisplayCommandResult("reconnect displays", true, $"Reconnected {reconnected} display(s) macOS had dropped.")
