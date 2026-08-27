@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -64,7 +65,18 @@ internal static class LanDiscovery
         using var client = new UdpClient(AddressFamily.InterNetwork) { ExclusiveAddressUse = false };
         client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
         client.Client.Bind(new IPEndPoint(IPAddress.Any, LanDiscoveryProtocol.Port));
-        client.JoinMulticastGroup(LanDiscoveryProtocol.MulticastAddress);
+        // Join the group on every IPv4 interface that is up, not just the OS's default multicast
+        // interface. A laptop whose default route sits on a VPN, a dock, or the wrong Wi-Fi silently
+        // misses every beacon otherwise, and discovery never recovers on its own.
+        foreach (var local in NetworkInterface.GetAllNetworkInterfaces()
+            .Where(n => n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+            .SelectMany(n => n.GetIPProperties().UnicastAddresses)
+            .Select(a => a.Address)
+            .Where(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a)))
+        {
+            try { client.JoinMulticastGroup(LanDiscoveryProtocol.MulticastAddress, local); }
+            catch (Exception) { /* an interface may not support multicast membership — keep the others */ }
+        }
 
         while (true)
         {

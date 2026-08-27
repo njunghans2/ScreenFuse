@@ -68,21 +68,91 @@ public class TwoComputerDeskTests
     }
 
     [Test]
-    public async Task ThePeerStopsRestartingOnceTheDeskHasSettled()
+    public async Task ThePeerNeverRestartsToAdoptADesk()
     {
-        // The first desk to arrive legitimately changes this computer's crossings, and that does
-        // need a restart. What must not happen is a second one, and a third, as the controller goes
-        // on learning input codes and nudging monitors.
+        // Adopting an arriving desk used to cost a restart, and the peer then restarted again every
+        // time the controller learned an input code or nudged a monitor. Everything in the document
+        // is applied where it stands now, including who holds the keyboard.
         using var desk = await Desk.ConvergedAsync();
-        var afterFirstSync = desk.Mac.Restarts;
 
         for (var i = 0; i < 8; i++) await desk.PumpAsync();
 
+        Assert.That(desk.Mac.Restarts, Is.Zero,
+            "a peer that restarts every time the desk changes never stays up long enough to be useful");
+    }
+
+    // -- handing the keyboard and mouse over --
+
+    [Test]
+    public async Task HandingOverSwapsTheRolesOnBothComputers()
+    {
+        using var desk = await Desk.ConvergedAsync();
+        Assert.That(desk.Windows.Profile.IsController, Is.True);
+        Assert.That(desk.Mac.Profile.IsController, Is.False);
+
+        var result = await desk.Mac.Service.SetControllerAsync("Mac");
+        await desk.Wire.DrainAsync();
+        await desk.PumpAsync();
+
         using (Assert.EnterMultipleScope())
         {
-            Assert.That(afterFirstSync, Is.LessThanOrEqualTo(1), "one restart to adopt the desk, no more");
-            Assert.That(desk.Mac.Restarts, Is.EqualTo(afterFirstSync),
-                "a peer that restarts every time the desk changes never stays up long enough to be useful");
+            Assert.That(result.Accepted, Is.True);
+            Assert.That(desk.Mac.Profile.IsController, Is.True, "the computer that asked takes control");
+            Assert.That(desk.Windows.Profile.IsController, Is.False, "the one that had it steps down");
+            Assert.That(desk.Mac.Snapshot.Controller, Is.EqualTo("Mac"));
+            Assert.That(desk.Windows.Snapshot.Controller, Is.EqualTo("Mac"));
+        }
+    }
+
+    [Test]
+    public async Task HandingOverRestartsNothing()
+    {
+        // This is the whole point of it. Handing the keyboard over used to restart every agent into
+        // its new role, which dropped the relay, took the tray icon and the settings window with
+        // it, and left the desk blank for several seconds.
+        using var desk = await Desk.ConvergedAsync();
+
+        await desk.Windows.Service.SetControllerAsync("Mac");
+        await desk.Wire.DrainAsync();
+        for (var i = 0; i < 4; i++) await desk.PumpAsync();
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(desk.Windows.Restarts, Is.Zero, "the computer giving up control stays up");
+            Assert.That(desk.Mac.Restarts, Is.Zero, "and so does the one taking it");
+        }
+    }
+
+    [Test]
+    public async Task HandingOverIsRememberedAcrossARestart()
+    {
+        using var desk = await Desk.ConvergedAsync();
+
+        await desk.Windows.Service.SetControllerAsync("Mac");
+        await desk.Wire.DrainAsync();
+        await desk.PumpAsync();
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(new ControllerOverrideStore(desk.Windows.Store.Path).Read(), Is.EqualTo("Mac"),
+                "the computer that gave control up comes back in its new role");
+            Assert.That(new ControllerOverrideStore(desk.Mac.Store.Path).Read(), Is.EqualTo("Mac"),
+                "and so does the one that took it");
+        }
+    }
+
+    [Test]
+    public async Task HandingOverToAComputerThatIsNotOnTheDeskIsRefused()
+    {
+        using var desk = await Desk.ConvergedAsync();
+
+        var result = await desk.Windows.Service.SetControllerAsync("Laptop");
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result.Accepted, Is.False);
+            Assert.That(desk.Windows.Snapshot.Controller, Is.EqualTo("NINOG"), "control stays where it was");
+            Assert.That(desk.Windows.Profile.IsController, Is.True);
         }
     }
 
@@ -269,6 +339,181 @@ public class TwoComputerDeskTests
         }
     }
 
+    [Test]
+    public async Task ADisconnectedHostImmediatelyLosesItsOptimisticMonitorOwnership()
+    {
+        using var desk = await Desk.ConvergedAsync();
+        var aorus = await desk.SwitchableAorusAsync();
+        await desk.SwitchAsync(aorus, "Mac");
+
+        await desk.Windows.Relay.FirePeersChanged();
+
+        Assert.That(desk.Windows.Snapshot.Monitors.Single(m => m.Id == aorus).ActiveHost, Is.Not.EqualTo("Mac"),
+            "a switched-off computer must not retain a display assignment or crossings after it leaves the relay");
+    }
+
+    [Test]
+    public async Task SwitchingTheLastMonitorAwayStopsThisComputersOutputInsteadOfBlankingThePanel()
+    {
+        // An OS with no display to render is a soft-locked OS: the last display is never removed
+        // from the desktop. What stops instead is this computer's own video output — never the
+        // panel. Blanking is a DDC command to the *monitor*, and a monitor has one power state no
+        // matter how many computers are wired to it: it blacked the panel out for the computer
+        // that had just won the switch, which is a black screen the monitor's own power button was
+        // the only way out of.
+        using var desk = await Desk.ConvergedAsync();
+
+        await desk.SwitchAsync(desk.Aorus, "Mac");
+        await desk.SwitchAsync(desk.Benq, "Mac");
+
+        using (Assert.EnterMultipleScope())
+        {
+            var commands = desk.Windows.Router.Commands;
+            Assert.That(commands, Does.Not.Contain(@"disable \\.\DISPLAY2"),
+                "the last display must not be removed from the desktop — Windows refuses, and the desk takes the refusal");
+            Assert.That(commands, Does.Not.Contain(@"blank \\.\DISPLAY2"),
+                "a monitor that has just changed hands must never be told to blank its panel");
+            Assert.That(commands, Does.Contain("sleep"),
+                "so this computer stops driving its output instead");
+            // The computer that gave it up has no display left. The monitor is not asleep — it is
+            // showing the computer that just won it, and marking it so cut every crossing through
+            // a lit screen.
+            var benq = desk.Windows.Snapshot.Monitors.Single(m => m.Id == desk.Benq);
+            Assert.That(benq.Sleeping, Is.False, "a monitor showing the computer that won it is not asleep");
+        }
+    }
+
+    [Test]
+    public async Task AMonitorWithNoInputSelectIsHandedOverByDroppingTheSignal()
+    {
+        // The BenQ XL2420T answers DDC perfectly well — luminance, contrast, colour gain — and
+        // returns 0x60 itself when asked what input it is on, because it does not implement input
+        // select at all. Every switch command such a monitor is sent is accepted and does nothing,
+        // which is indistinguishable from an intermittent fault. It still changes computers: the
+        // one showing it stops driving, and the monitor's own detection finds the one that still is.
+        using var desk = await Desk.ConvergedAsync(windowsMonitors: Desk.WindowsMonitorsWithADeafBenq());
+        desk.Windows.Router.Commands.Clear();
+
+        await desk.SwitchAsync(desk.Benq, "Mac");
+
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(desk.Windows.Router.Commands.Where(c => c.StartsWith(@"input \\.\DISPLAY2=", StringComparison.Ordinal)),
+                Is.Empty, "a monitor with no input select must not be sent input commands");
+            Assert.That(desk.Windows.Router.Commands.Any(c => c is @"disable \\.\DISPLAY2" or "sleep"),
+                Is.True, "the computer showing it stops driving instead — that release is the switch");
+        }
+    }
+
+    [Test]
+    public async Task TakingAMonitorBackLeavesTheOtherComputersOwnScreenAlone()
+    {
+        // Handing the BenQ back to the PC put the MacBook's own screen to sleep with it. The desk
+        // reasoned that a computer left with only an unswitchable panel had been asked to be off —
+        // but the user asked for one monitor to move, not for the Mac to go dark. And because a
+        // slept monitor is not a crossing, it took the pointer's way onto the Mac with it.
+        using var desk = await Desk.ConvergedAsync();
+        await desk.SwitchAsync(desk.Benq, "Mac");
+        desk.Mac.Router.Commands.Clear();
+
+        await desk.SwitchAsync(desk.Benq, "NINOG");
+
+        var builtIn = desk.Windows.Snapshot.Monitors.Single(m => m.Id == desk.BuiltIn);
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(desk.Mac.Router.Commands.Any(c => c.StartsWith("blank", StringComparison.Ordinal) || c == "sleep"),
+                Is.False, "the computer losing the monitor keeps the screens it still has");
+            Assert.That(builtIn.Sleeping, Is.False, "and they stay awake on the desk");
+            var neighbours = desk.Windows.Config.Profiles.SelectMany(p => p.Hosts).SelectMany(h => h.Neighbours);
+            Assert.That(neighbours.Any(n => n.DestScreen != null
+                    && n.DestScreen.Contains("Built-in", StringComparison.OrdinalIgnoreCase)),
+                Is.True, "so the pointer can still reach the computer that gave the monitor up");
+        }
+    }
+
+    [Test]
+    public async Task AMonitorThatIgnoresEveryDdcCommandIsStillHandedOver()
+    {
+        // Some monitors accept an input command and do nothing with it. Discovery then exhausts
+        // every code and reports failure, which used to end the switch right there — before the
+        // computer losing the monitor had been released. What the user saw was the gaining
+        // computer dutifully lighting up its display while the monitor sat where it was.
+        using var desk = await Desk.ConvergedAsync(monitorsIgnoreInputWrites: true);
+        desk.Windows.Router.Commands.Clear();
+
+        await desk.SwitchAsync(desk.Benq, "Mac");
+
+        var commands = desk.Windows.Router.Commands;
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(commands.Any(c => c.StartsWith(@"input \\.\DISPLAY2=", StringComparison.Ordinal)),
+                Is.True, "pre-condition: DDC was tried first");
+            Assert.That(commands.Any(c => c is @"disable \\.\DISPLAY2" or "sleep"),
+                Is.True, "and when it got nowhere, the losing computer let the monitor go anyway");
+        }
+    }
+
+    [Test]
+    public async Task AMonitorThatPublishesNoInputCodesIsStillWorthTrying()
+    {
+        // Plenty of panels publish no capabilities string, or one with no value list for 0x60 — the
+        // BenQ XL2420T is one. Reading that as "no codes to try" made the monitor that most needed
+        // discovering the one that never could be: the desk gave up before sending a single command.
+        using var desk = await Desk.ConvergedAsync();
+        desk.Windows.Router.Commands.Clear();
+
+        await desk.SwitchAsync(desk.Benq, "Mac");
+
+        var tried = desk.Windows.Router.Commands
+            .Where(c => c.StartsWith(@"input \\.\DISPLAY2=", StringComparison.Ordinal))
+            .ToList();
+        Assert.That(tried, Is.Not.Empty,
+            "a monitor that admits to no codes is still worth trying the standard sockets on");
+    }
+
+    [Test]
+    public async Task TheGainingComputersDisplayIsBackOnItsDesktopBeforeTheInputMoves()
+    {
+        // Waking a computer is not the same as it driving the panel: a display removed from the
+        // desktop on the way out stays removed, so the monitor still arrived at a socket with no
+        // signal on it and hunted back to the computer it had been told to leave. Re-enabling it
+        // used to be the last step of the switch, seconds after the monitor had given up.
+        using var desk = await Desk.ConvergedAsync();
+
+        await desk.SwitchAsync(desk.Benq, "Mac");
+        desk.Windows.Router.Commands.Clear();
+        await desk.SwitchAsync(desk.Benq, "NINOG");
+
+        var commands = desk.Windows.Router.Commands;
+        var enabled = commands.IndexOf(@"enable \\.\DISPLAY2");
+        var switched = commands.FindIndex(c => c.StartsWith(@"input \\.\DISPLAY2=", StringComparison.Ordinal));
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(enabled, Is.GreaterThanOrEqualTo(0),
+                "the computer the monitor is going to has to put that display back on its desktop");
+            Assert.That(switched, Is.GreaterThanOrEqualTo(0), "pre-condition: the monitor was switched");
+            Assert.That(enabled, Is.LessThan(switched),
+                "and it has to happen before the input moves, not after the monitor has given up");
+        }
+    }
+
+    [Test]
+    public async Task SwitchingAMonitorBackWakesTheBlankedLastDisplay()
+    {
+        using var desk = await Desk.ConvergedAsync();
+        await desk.SwitchAsync(desk.Aorus, "Mac");
+        await desk.SwitchAsync(desk.Benq, "Mac");
+
+        await desk.SwitchAsync(desk.Benq, "NINOG");
+
+        var benq = desk.Windows.Snapshot.Monitors.Single(m => m.Id == desk.Benq);
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(benq.Sleeping, Is.False, "the monitor that returns is not blanked anymore");
+            Assert.That(desk.Windows.Snapshot.Crossings, Is.Not.Empty, "its crossings come back with it");
+        }
+    }
+
     private sealed class Desk : IDisposable
     {
         public required Node Windows { get; init; }
@@ -284,14 +529,11 @@ public class TwoComputerDeskTests
             Windows.Snapshot.Monitors.Single(m => m.Width == width).Id;
 
 
-        // The AORUS with both sockets known, which is what makes it switchable at all. The Mac
-        // cannot read that monitor while Windows is on it, so in real use the code is either learned
-        // the one time the Mac is on screen or entered by hand; either way it ends up here.
+        // This fixture seeds the two known cables; production learns them from display inventories.
         public async Task<string> SwitchableAorusAsync()
         {
             var aorus = Windows.Snapshot.Monitors.Single(m => m.Width == 2560);
-            await Windows.Service.ProbeInputAsync(aorus.Id, "Mac", 17);
-            await Wire.DrainAsync();
+            await Task.CompletedTask;
             return aorus.Id;
         }
 
@@ -307,6 +549,8 @@ public class TwoComputerDeskTests
             }
             await switching;
         }
+
+
         public async Task ArrangeAsync(params (string Id, int X, int Y)[] places)
         {
             var byId = Windows.Snapshot.Monitors.ToDictionary(m => m.Id);
@@ -317,10 +561,13 @@ public class TwoComputerDeskTests
             await PumpAsync();
         }
 
-        public static async Task<Desk> ConvergedAsync(bool announcePeers = true)
+        public static async Task<Desk> ConvergedAsync(
+            bool announcePeers = true, List<PhysicalMonitorInfo>? windowsMonitors = null,
+            bool monitorsIgnoreInputWrites = false)
         {
             var wire = new Wire();
-            var windows = Node.Create("NINOG", Mode.Master, wire, WindowsScreens(), WindowsMonitors());
+            var windows = Node.Create("NINOG", Mode.Master, wire, WindowsScreens(),
+                windowsMonitors ?? WindowsMonitors(), monitorsIgnoreInputWrites);
             var mac = Node.Create("Mac", Mode.Slave, wire, MacScreens(), MacMonitors());
             wire.Connect(windows, mac);
 
@@ -370,6 +617,14 @@ public class TwoComputerDeskTests
             new(@"\\.\DISPLAY2", "XL2410T", @"\\.\DISPLAY2", 15, [1, 3, 17, 18, 15], ["XL2410T", "BenQ XL2420T (DisplayPort)"]),
         ];
 
+        // A panel that answers DDC but not input select: asked what input it is on it returns 0x60
+        // itself — 96 — exactly as a BenQ XL2420T does, and publishes no list of codes it accepts.
+        public static List<PhysicalMonitorInfo> WindowsMonitorsWithADeafBenq() =>
+        [
+            new(@"\\.\DISPLAY1", "AORUS", @"\\.\DISPLAY1", 15, [1, 3, 15, 17], ["AORUS", "Generic PnP Monitor"]),
+            new(@"\\.\DISPLAY2", "XL2410T", @"\\.\DISPLAY2", 96, null, ["XL2410T", "BenQ XL2420T (DisplayPort)"]),
+        ];
+
         // m1ddc reaches one display and cannot name it: "[1] (null) (37D8832A-…)".
         private static List<PhysicalMonitorInfo> MacMonitors() =>
         [
@@ -400,7 +655,8 @@ public class TwoComputerDeskTests
         public HydraConfigFile Config => Store.Load();
         public int ConfigWrites => File.Exists(Store.Path) ? File.ReadAllText(Store.Path).GetHashCode() : 0;
 
-        public static Node Create(string name, Mode mode, Wire wire, LocalScreenSnapshot screens, List<PhysicalMonitorInfo> monitors)
+        public static Node Create(string name, Mode mode, Wire wire, LocalScreenSnapshot screens,
+            List<PhysicalMonitorInfo> monitors, bool ignoresInputWrites = false)
         {
             var directory = Path.Combine(Path.GetTempPath(), $"screenfuse-desk-{Guid.NewGuid():N}");
             System.IO.Directory.CreateDirectory(directory);
@@ -422,7 +678,7 @@ public class TwoComputerDeskTests
                         : null,
                 });
 
-            var router = new StubRouter(monitors);
+            var router = new StubRouter(monitors, screens.Screens.Count, ignoresInputWrites);
             var relay = new WiredRelay(name, wire);
             var world = new WorldState();
             var store = new DeskConfigStore(configPath);
@@ -447,6 +703,20 @@ public class TwoComputerDeskTests
         private static HydraConfigFile Seed(string name, Mode mode) => new()
         {
             Name = name,
+            Monitors =
+            [
+                new DeskMonitorConfig
+                {
+                    Id = "aorus",
+                    Label = "AORUS",
+                    Aliases = ["AORUS"],
+                    Sources =
+                    [
+                        new MonitorSourceConfig { Host = "NINOG", Input = 15, DdcId = @"\\.\DISPLAY1", AvailableInputs = [1, 3, 15, 17] },
+                        new MonitorSourceConfig { Host = "Mac", Input = 17 },
+                    ],
+                },
+            ],
             Profiles =
             [
                 new HydraConfig
@@ -529,10 +799,15 @@ public class TwoComputerDeskTests
         }
     }
 
-    private sealed class StubRouter(List<PhysicalMonitorInfo> monitors) : IDisplayRouter
+    private sealed class StubRouter(List<PhysicalMonitorInfo> monitors, int localDisplays, bool ignoresInputWrites = false) : IDisplayRouter
     {
         // What was asked of the hardware, in order, so a test can say "woken, then switched".
         public List<string> Commands { get; } = [];
+
+        // Which of this computer's displays have been taken off its desktop. Modelled because the
+        // real Windows one refuses to remove the last active display — an OS with nothing to render
+        // is a soft-locked OS — and the desk's whole last-display path is the answer to that refusal.
+        private readonly HashSet<string> _disabled = new(StringComparer.OrdinalIgnoreCase);
 
         public Task<IReadOnlyList<DisplayCommandResult>> ApplyAsync(DisplayRoutingConfig routing, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<DisplayCommandResult>>([]);
@@ -543,12 +818,34 @@ public class TwoComputerDeskTests
         public Task<DisplayCommandResult> SetInputAsync(string id, int input, CancellationToken cancellationToken = default)
         {
             Commands.Add($"input {id}={input}");
+            // A monitor that does not implement input select accepts the command and does nothing —
+            // there is no failure to detect, which is exactly what makes it hard to tell from a
+            // monitor that is merely slow.
+            if (ignoresInputWrites) return Task.FromResult(new DisplayCommandResult($"set {id} input {input}", true));
+            // emulate hardware: the monitor now reports the new input as its current one
+            for (var i = 0; i < monitors.Count; i++)
+                if (monitors[i].Id == id || monitors[i].LogicalName == id || monitors[i].Description.Contains(id, StringComparison.OrdinalIgnoreCase))
+                    monitors[i] = monitors[i] with { CurrentInput = input };
             return Task.FromResult(new DisplayCommandResult($"set {id} input {input}", true));
         }
         public Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default)
         {
             Commands.Add(wake ? "wake" : "sleep");
             return Task.FromResult(new DisplayCommandResult("power", true));
+        }
+        public Task<DisplayCommandResult> SetMonitorDisplayEnabledAsync(string localSourceId, bool enabled, CancellationToken cancellationToken = default)
+        {
+            if (!enabled && _disabled.Count + 1 >= localDisplays && localDisplays > 0)
+                return Task.FromResult(new DisplayCommandResult("display", false, "refusing to disable the last active display"));
+
+            Commands.Add(enabled ? $"enable {localSourceId}" : $"disable {localSourceId}");
+            if (enabled) _disabled.Remove(localSourceId); else _disabled.Add(localSourceId);
+            return Task.FromResult(new DisplayCommandResult("display", true));
+        }
+        public Task<DisplayCommandResult> SetDisplayStandbyAsync(string localSourceId, bool standby, CancellationToken cancellationToken = default)
+        {
+            Commands.Add(standby ? $"blank {localSourceId}" : $"unblank {localSourceId}");
+            return Task.FromResult(new DisplayCommandResult("standby", true));
         }
     }
 

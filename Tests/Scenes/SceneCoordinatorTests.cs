@@ -70,5 +70,9 @@ public class SceneCoordinatorTests
             Task.FromResult(new DisplayCommandResult($"set {id} input {input}", true));
         public Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default) =>
             Task.FromResult(new DisplayCommandResult(wake ? "wake displays" : "sleep displays", true));
+        public Task<DisplayCommandResult> SetMonitorDisplayEnabledAsync(string localSourceId, bool enabled, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new DisplayCommandResult(enabled ? "enable display" : "disable display", true));
+        public Task<DisplayCommandResult> SetDisplayStandbyAsync(string localSourceId, bool standby, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new DisplayCommandResult(standby ? "blank display" : "wake display", true));
     }
 }

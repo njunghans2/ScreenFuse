@@ -26,6 +26,9 @@ public static class DeskArrangement
         {
             var host = hostFor(monitor.Id);
             if (string.IsNullOrWhiteSpace(host) || monitor.Width <= 0 || monitor.Height <= 0) continue;
+            // A blanked (sleeping) panel must never take the pointer: it is black, so a crossing
+            // onto it strands the cursor on a display nobody can see.
+            if (monitor.Sleeping) continue;
             placed.Add(new Placed(monitor.Id, host!, monitor.Source(host!)?.ScreenId,
                 monitor.DeskX, monitor.DeskY, monitor.Width, monitor.Height));
         }

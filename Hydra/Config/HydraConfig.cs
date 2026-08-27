@@ -30,6 +30,26 @@ public class DeskMonitorConfig
     public int Height { get; init; }
     public List<MonitorSourceConfig> Sources { get; init; } = [];
 
+    // Whether the pointer may cross onto this monitor from another computer. Turned off, the
+    // monitor stays on whichever computer drives it and the pointer cannot leave or enter through
+    // it. Defaults to on.
+
+    // True while this monitor is the blanked (slept) last display of a computer — the desk never
+    // removes an OS's final display, it blacks the panel out instead, and the monitor stays in
+    // this state until a switch brings another display (or itself) back.
+    public bool Sleeping { get; init; }
+
+    // True for a monitor that does not implement input select (VCP 0x60) at all. It still changes
+    // computers — it just does it the only way it can: the computer showing it stops driving, and
+    // the monitor's own input detection settles on the one that still is. There is no command to
+    // send it and no input to read back, so the desk stops trying both.
+    //
+    // Older panels are like this and answer DDC perfectly well otherwise: a BenQ XL2420T reports
+    // its luminance and contrast, and returns 0x60 itself when asked what input it is on. Trying to
+    // switch such a monitor by DDC is silent and total failure — every command is accepted and
+    // nothing happens — which reads as an intermittent fault for as long as it takes to notice.
+    public bool FollowsTheSignal { get; init; }
+
     public MonitorSourceConfig? Source(string host) => Sources.FirstOrDefault(s => s.Host.EqualsIgnoreCase(host));
 
     // Not a property: a computed property would be serialised into the config file as a field
@@ -40,7 +60,8 @@ public class DeskMonitorConfig
     // aliases — and with them its identity, so the next merge splits it in two again.
     public DeskMonitorConfig With(
         string? label = null, int? deskX = null, int? deskY = null,
-        int? width = null, int? height = null, List<MonitorSourceConfig>? sources = null) => new()
+        int? width = null, int? height = null, List<MonitorSourceConfig>? sources = null,
+        bool? sleeping = null, bool? followsTheSignal = null) => new()
     {
         Id = Id,
         Label = label ?? Label,
@@ -50,6 +71,8 @@ public class DeskMonitorConfig
         Width = width ?? Width,
         Height = height ?? Height,
         Sources = sources ?? Sources,
+        Sleeping = sleeping ?? Sleeping,
+        FollowsTheSignal = followsTheSignal ?? FollowsTheSignal,
     };
 }
 
@@ -143,8 +166,13 @@ public class HydraConfig
     // When null the explicit per-machine Mode above is used (legacy configs).
     public string? Controller { get; init; }
 
-    public Mode ResolveMode(string localName) =>
-        Controller is { Length: > 0 } c ? (c.EqualsIgnoreCase(localName) ? Config.Mode.Master : Config.Mode.Slave) : Mode;
+    public Mode ResolveMode(string localName) => ResolveMode(Controller, Mode, localName);
+
+    // The one rule, in one place: a named controller decides the role, and only a profile that
+    // names nobody falls back to its own explicit mode. The live profile resolves the same way off
+    // a controller that can change while the process runs, so it must not be a second copy of this.
+    public static Mode ResolveMode(string? controller, Mode fallback, string localName) =>
+        controller is { Length: > 0 } c ? (c.EqualsIgnoreCase(localName) ? Config.Mode.Master : Config.Mode.Slave) : fallback;
     // master only — ignored in slave mode
     public List<HostConfig> Hosts { get; init; } = [];
     // slave only — scale config is reported to master via ScreenInfoEntry, master applies it when routing to slave screens

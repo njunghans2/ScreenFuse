@@ -6,11 +6,18 @@ namespace Hydra.Screen;
 
 public class ScreenLayout(List<ScreenRect> screens, List<HostConfig> configs, int? defaultDeadCorners, Dictionary<string, decimal> screenScales, ILogger log)
 {
-    private const int JumpZone = 1;
-    private const int NudgeDistance = 2;
+    private const int JumpZone = 3;
+    // How far the pointer lands inside the destination when it crosses. Must sit outside the jump
+    // zone: the interval return-check would otherwise bounce a pointer straight back the moment it
+    // arrived — it lands in the zone it is supposed to be leaving.
+    private const int NudgeDistance = JumpZone + 1;
 
     private readonly Dictionary<(string Name, Direction Dir), List<EdgeLink>> _graph = BuildGraph(screens, configs, log);
     private readonly Dictionary<string, int> _deadCorners = BuildDeadCorners(screens, configs, defaultDeadCorners, screenScales);
+
+    // debug: which crossing edges were built for a screen (diagnoses crossings that go nowhere)
+    public string EdgeKeys(string screen) =>
+        string.Join(",", _graph.Keys.Where(k => k.Name == screen).Select(k => k.Dir));
 
     private static Dictionary<(string, Direction), List<EdgeLink>> BuildGraph(
         List<ScreenRect> screens, List<HostConfig> configs, ILogger log)

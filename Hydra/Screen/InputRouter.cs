@@ -35,6 +35,12 @@ public class InputRouter(
     private const int MaxMouseHz = 125; // should divide evenly by 1000
     private const int MinMouseIntervalMs = 1000 / MaxMouseHz;
 
+    // Routing belongs to the computer holding the keyboard and mouse. The router runs on every
+    // computer so the role can change without restarting anything, and does nothing at all on the
+    // ones that are following — exactly as if it had not been started there, which is what used to
+    // happen. Read live: it changes the moment the desk hands control over.
+    private bool Routing => profile.IsController;
+
     private readonly IWorldState _peerState = peerState ?? new WorldState();
     private readonly Func<long> _getTickCount = getTickCount ?? (() => Environment.TickCount64);
 
@@ -46,6 +52,35 @@ public class InputRouter(
             new UnboundedChannelOptions { SingleReader = true, AllowSynchronousContinuations = false });
     private Task? _consumerTask;
 
+    // Talking to the clipboard, or to the file manager, means a call into another process. On
+    // Windows OpenClipboard sleeps and retries while another app holds the global clipboard mutex,
+    // GetClipboardData on a delayed-render format blocks until the owning app renders it, and
+    // asking Explorer for the selection or for the paste folder is COM into a process that may be
+    // busy. Hundreds of milliseconds is ordinary; seconds is not rare.
+    //
+    // None of it may run on the command consumer. That loop owns every keystroke and every mouse
+    // move, and while the pointer is away the input hooks are swallowing local input on the promise
+    // that the loop is forwarding it. A blocked loop turns that promise into a machine with no
+    // keyboard and no mouse -- which is what a screen crossing (clipboard push) and Ctrl+C
+    // (Explorer) used to do to it. They run here instead: off the loop, but still one at a time,
+    // because two clipboard reads racing each other is its own bug.
+    private readonly Channel<Action> _platformWork =
+        Channel.CreateUnbounded<Action>(
+            new UnboundedChannelOptions { SingleReader = true, AllowSynchronousContinuations = false });
+    private Task? _platformWorkTask;
+
+    // Watched from outside the consumer, so that a wedged consumer can still be caught. See CheckForStall.
+    private Timer? _deadman;
+    private long _lastCommandTick;
+    private int _pendingInput;
+    private int _swallowReleased;
+    private int _parkX, _parkY;
+
+    // How long input may be swallowed with events piling up before the loop is declared stuck.
+    // Commands are sub-millisecond once the blocking platform calls are off them, so this sits far
+    // above anything healthy and far below what a person will sit through.
+    private const int StallReleaseMs = 2000;
+
     private CancellationTokenSource? _pollCts;
     private readonly IScreenSaverSync _screenSaverSync = screenSaverSync;
     private readonly IClipboardSync _clipboardSync = clipboardSync;
@@ -53,6 +88,11 @@ public class InputRouter(
     private readonly IFileSelectionDetector _selectionDetector = selectionDetector;
     private ClipboardSnapshot? _lastReceived;
     private string? _lastPulledFrom;
+
+    // The return edge is checked again on a beat, not only on mouse deltas and position reports:
+    // a pointer parked at a crossing — even one that never moved enough to trigger a report —
+    // comes home within a beat. This is what makes the return deterministic rather than eventual.
+    private Timer? _returnBeat;
 
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -66,6 +106,7 @@ public class InputRouter(
         }
 
         log.LogInformation("Host: {Name}", profile.Name);
+        _returnBeat = new Timer(_ => CheckReturnHome(), null, TimeSpan.FromMilliseconds(400), TimeSpan.FromMilliseconds(400));
 
         if (!profile.RemoteOnly && profile.LocalHost == null && profile.Hosts.Count > 0)
         {
@@ -106,7 +147,9 @@ public class InputRouter(
         _pollCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
         // start consumer before event tap so early events are processed
+        Volatile.Write(ref _lastCommandTick, _getTickCount());
         _consumerTask = Task.Run(ProcessCommands, cancellationToken);
+        _platformWorkTask = Task.Run(ProcessPlatformWork, cancellationToken);
 
         await platform.StartEventTap((x, y) => OnMouseMove(x, y), OnMouseDelta, OnKeyEvent, OnMouseButton, OnMouseScroll,
             onLocalActivity: () => _ = _commands.Writer.TryWrite(_ => activityTracker.LocalActivity()));
@@ -115,12 +158,21 @@ public class InputRouter(
         _screenSaverSync.ScreensaverDeactivated += OnScreensaverDeactivated;
         _screenSaverSync.ScreenLocked += OnLockDetected;
         _screenSaverSync.ScreenUnlocked += OnScreenUnlocked;
-        if (profile.HideCursor)
+        // hideCursor belongs to the computer driving the desk; it travels in the shared document
+        // like everything else, so a follower would otherwise hide its own cursor on its own screen
+        if (profile.HideCursor && Routing)
             cursorHider.Hide();
+
+        profile.ControllerChanged += OnControllerChanged;
+
+        _deadman = new Timer(_ => CheckForStall(), null, StallReleaseMs / 4, StallReleaseMs / 4);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        _returnBeat?.Dispose();
+        _deadman?.Dispose();
+        _deadman = null;
         _pollCts?.Cancel();
         _pollCts?.Dispose();
         relay.PeersChanged -= OnPeersChanged;
@@ -133,6 +185,7 @@ public class InputRouter(
         _screenSaverSync.ScreensaverDeactivated -= OnScreensaverDeactivated;
         _screenSaverSync.ScreenLocked -= OnLockDetected;
         _screenSaverSync.ScreenUnlocked -= OnScreenUnlocked;
+        profile.ControllerChanged -= OnControllerChanged;
         platform.StopEventTap();
 
         // drain remaining commands, then stop consumer
@@ -140,12 +193,62 @@ public class InputRouter(
         if (_consumerTask != null)
             await _consumerTask;
 
+        _platformWork.Writer.TryComplete();
+        if (_platformWorkTask != null)
+            await _platformWorkTask;
+
         // consumer is done; safe to access _state directly
         if (_state.Mouse.IsOnVirtualScreen)
         {
             platform.IsOnVirtualScreen = false;
             cursorHider.Show();
         }
+    }
+
+    // Control moved. Nothing is created or destroyed here: both halves have been running all
+    // along, and this is the moment they change which one is in charge.
+    private void OnControllerChanged()
+    {
+        if (Routing)
+        {
+            // Taking over. The peers have to be told who to answer to now — they learn it from
+            // MasterConfig, which until this moment came from somebody else.
+            log.LogInformation("This computer now has the keyboard and mouse");
+            // Whoever was the controller a moment ago is filed here as this machine's master, from
+            // the MasterConfig it sent while it still was one. Left there, this computer would keep
+            // forwarding its logs to a machine that is now following it.
+            _ = _peerState.PruneMasters([]);
+            var payload = MessageSerializer.Encode(MessageKind.MasterConfig, new MasterConfigMessage(profile.LogLevel));
+            foreach (var host in profile.RemoteHosts.Select(h => h.Name))
+                relay.Send([host], payload);
+            _ = RebuildForNewCrossingsAsync();
+            return;
+        }
+
+        // Giving it up. If the pointer is standing on another computer's screen it has to come all
+        // the way home first, and "all the way" is the part that was missing: the local hooks are
+        // swallowing input on the promise that this router is forwarding it, and the computer being
+        // stood on is holding the cursor hidden until it is told the pointer left. A router that
+        // simply stopped forwarding left this machine with no keyboard and no mouse, and the other
+        // one convinced a pointer was still on it — so nothing could cross back either way.
+        log.LogInformation("The keyboard and mouse moved to {Host}", profile.Controller ?? "another computer");
+        _ = _commands.Writer.TryWrite(async st =>
+        {
+            var host = LeaveVirtualScreen(st, out var warpX, out var warpY);
+            if (host != null)
+            {
+                ReturnToLocalScreen(warpX, warpY);
+                ShowCursorOnReturn();
+                if (relay.IsConnected) LeaveRemoteScreen(host);
+                log.LogInformation("Gave up control while on '{Host}' — pointer returned home", host);
+            }
+
+            // Unconditionally, even when the pointer was already at home: whatever this machine was
+            // in the middle of, it is not routing any more and must not be left swallowing input.
+            platform.IsOnVirtualScreen = false;
+            await platform.ShowCursor();
+            cursorHider.Show();
+        });
     }
 
     private async Task ProcessCommands()
@@ -163,7 +266,104 @@ public class InputRouter(
             {
                 log.LogError(ex, "InputRouter command failed — continuing");
             }
+            finally
+            {
+                // Answered after every command, including the one that threw. See ReconcileSwallow.
+                ReconcileSwallow(_state);
+                Volatile.Write(ref _lastCommandTick, _getTickCount());
+            }
         }
+    }
+
+    // Runs the calls that reach out to the clipboard and the file manager, off the command consumer
+    // and one at a time. Nothing here reports back: every caller has already decided what it wants
+    // and none of them needs an answer, which is exactly why this work never belonged on the loop
+    // that routes input.
+    private async Task ProcessPlatformWork()
+    {
+        await foreach (var work in _platformWork.Reader.ReadAllAsync())
+        {
+            // Every exception, cancellation included. There is no shutdown signal to read here --
+            // the queue closing is the only one -- so letting anything escape would end the worker
+            // and take clipboard sync with it for the rest of the session, in silence.
+            try { work(); }
+            catch (Exception ex)
+            {
+                log.LogError(ex, "Clipboard or file-manager work failed — continuing");
+            }
+        }
+    }
+
+    private void OffLoop(Action work) => _platformWork.Writer.TryWrite(work);
+
+    // Every key, click, scroll and mouse movement is queued through here, so that the watch below
+    // can tell input that is waiting to be forwarded from a loop that simply has nothing to do. The
+    // count comes down even when the command throws: either way the event is no longer waiting.
+    private void PostInput(Func<LocalMasterState, ValueTask> body)
+    {
+        Interlocked.Increment(ref _pendingInput);
+        if (!_commands.Writer.TryWrite(async st =>
+            {
+                try { await body(st); }
+                finally { Interlocked.Decrement(ref _pendingInput); }
+            }))
+            Interlocked.Decrement(ref _pendingInput);
+    }
+
+    // The input hooks swallow every local key and click while platform.IsOnVirtualScreen is set, on
+    // the promise that the pointer is away and this router is forwarding them. The router's own
+    // answer to that question is st.Mouse.IsOnVirtualScreen. The half-dozen places that arm and
+    // clear the flag still do so where they do, because the moment matters -- swallowing has to
+    // start before the cursor is parked and stop before it is put back. What they cannot do is
+    // guarantee the pair ends up agreeing, on a consumer that deliberately survives a throw: a
+    // command that threw between arming the flag and entering the screen left a machine with no
+    // keyboard and no mouse and nothing that would ever clear it, because the router believed the
+    // pointer was already home. So the flag is settled here, after every command, from the one
+    // piece of state that knows the answer.
+    private void ReconcileSwallow(LocalMasterState st)
+    {
+        // The deadman gave local input back because this loop had stopped answering. Whatever the
+        // state still claims, the pointer is here now -- bring it home rather than resume swallowing.
+        if (Interlocked.Exchange(ref _swallowReleased, 0) == 1 && st.Mouse.IsOnVirtualScreen)
+        {
+            var host = LeaveVirtualScreen(st, out var homeX, out var homeY);
+            if (host != null)
+            {
+                ReturnToLocalScreen(homeX, homeY);
+                ShowCursorOnReturn();
+                if (relay.IsConnected) LeaveRemoteScreen(host);
+                log.LogWarning("The pointer was brought home after input routing stalled on '{Host}'", host);
+            }
+        }
+
+        var shouldSwallow = st.Mouse.IsOnVirtualScreen;
+        if (platform.IsOnVirtualScreen == shouldSwallow) return;
+        if (!shouldSwallow)
+            log.LogWarning("Local input was being swallowed with the pointer at home — released");
+        platform.IsOnVirtualScreen = shouldSwallow;
+    }
+
+    // The loop that forwards input can stop answering -- a platform call that blocks, a deadlock, a
+    // bug -- and while it does, the hooks keep swallowing every key and click on its behalf. That is
+    // a machine with no keyboard and no mouse, and nothing inside the loop can rescue it, because
+    // the loop is the thing that stopped. So it is watched from out here, where a stall is visible:
+    // input being swallowed, events piling up, and none of them coming off the queue. Local input
+    // goes back to the user immediately; ReconcileSwallow brings the pointer home when the loop
+    // recovers, so that it does not simply start swallowing again.
+    private void CheckForStall()
+    {
+        if (!platform.IsOnVirtualScreen) return;
+        var waiting = Volatile.Read(ref _pendingInput);
+        if (waiting == 0) return;   // nothing waiting is an idle loop, not a stuck one
+        var stalledMs = _getTickCount() - Volatile.Read(ref _lastCommandTick);
+        if (stalledMs < StallReleaseMs) return;
+        if (Interlocked.Exchange(ref _swallowReleased, 1) == 1) return;   // already given back
+
+        log.LogError("Input has been swallowed for {Ms}ms with {Waiting} event(s) waiting — giving local input back",
+            stalledMs, waiting);
+        platform.IsOnVirtualScreen = false;
+        cursorHider.Show();
+        platform.WarpCursor(Volatile.Read(ref _parkX), Volatile.Read(ref _parkY));
     }
 
     // posts a fence command and awaits it. the tcs is ALWAYS completed — even if the command throws
@@ -198,11 +398,30 @@ public class InputRouter(
 
     // posts a fence command and awaits it — all previously queued commands will have been processed on return.
     // used by tests to synchronize after firing platform events.
-    internal Task FlushAsync()
+    //
+    // Both queues, because the work is split across both: a command hands the clipboard and the file
+    // manager to the platform worker, and the worker hands the result back as a command. Draining
+    // commands alone would return before any of that had happened.
+    internal async Task FlushAsync()
     {
-        if (_consumerTask == null) return Task.CompletedTask;
+        if (_consumerTask == null) return;
+        await FlushCommands();
+        await FlushPlatformWork();
+        await FlushCommands();
+    }
+
+    private Task FlushCommands()
+    {
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!_commands.Writer.TryWrite(_ => { tcs.TrySetResult(); return ValueTask.CompletedTask; }))
+            return Task.CompletedTask;
+        return tcs.Task;
+    }
+
+    private Task FlushPlatformWork()
+    {
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_platformWork.Writer.TryWrite(() => tcs.TrySetResult()))
             return Task.CompletedTask;
         return tcs.Task;
     }
@@ -231,26 +450,24 @@ public class InputRouter(
         }
     }
 
+    // A display appeared or disappeared. This is the path a monitor changing hands takes -- the
+    // desk hands it to the other computer, this one loses the signal and says so -- and it used to
+    // build the layout itself, inline. That made it the one rebuild that skipped what RebuildLayout
+    // does at the end: bring the pointer home when the new layout leaves it nowhere to go, follow
+    // the screen it is standing on, and put the park point back on a display that still exists. A
+    // desk switch fires this and OnHostsChanged together and this one usually writes last, so the
+    // guard the other path ran was overwritten by a layout that had never been checked.
     private async Task OnScreensChanged(LocalScreenSnapshot snapshot)
     {
         log.LogInformation("Screen configuration changed — rebuilding layout");
         LogDetectedScreens(snapshot.Screens);
-        var newScreens = BuildAllScreens(snapshot.Screens);
         var peerScreens = await _peerState.GetPeerScreensSnapshot();
 
         await RunFence(st =>
         {
-            ApplyPeerScreenSizes(peerScreens, newScreens);
             st.LocalScreens = snapshot.Screens;
             st.LocalScreenEntries = snapshot.Entries;
-            st.Screens = newScreens;
-            st.Layout = new ScreenLayout(newScreens, profile.Hosts, profile.DeadCorners, BuildScaleMap(st.LocalScreenEntries, peerScreens), log);
-
-            if (!st.Mouse.IsOnVirtualScreen)
-            {
-                st.ActiveLocalScreen = st.LocalScreens.FirstOrDefault() ?? st.ActiveLocalScreen;
-                if (st.ActiveLocalScreen != null) UpdateWarpPoint(st, st.ActiveLocalScreen);
-            }
+            RebuildLayout(st, peerScreens);
             return ValueTask.CompletedTask;
         });
     }
@@ -287,13 +504,15 @@ public class InputRouter(
         // peer did (Abort tears down ANY transfer, so the old cursor-screen-coupled call aborted unrelated ones)
         _fileTransfer.AbortIfPeerGone(current, relay);
 
-        // send MasterConfig only to newly appeared peers that are configured as slaves
-        foreach (var host in delta.NewPeers)
-        {
-            var payload = MessageSerializer.Encode(MessageKind.MasterConfig, new MasterConfigMessage(profile.LogLevel));
-            relay.Send([host], payload);
-            log.LogDebug("Sent MasterConfig to {Host}", host);
-        }
+        // send MasterConfig only to newly appeared peers, and only while this computer is the one
+        // holding the keyboard — it is the message that tells a peer who to treat as the controller
+        if (Routing)
+            foreach (var host in delta.NewPeers)
+            {
+                var payload = MessageSerializer.Encode(MessageKind.MasterConfig, new MasterConfigMessage(profile.LogLevel));
+                relay.Send([host], payload);
+                log.LogDebug("Sent MasterConfig to {Host}", host);
+            }
 
         if (profile.RemoteOnly)
         {
@@ -323,6 +542,7 @@ public class InputRouter(
 
     private void OnScreensaverActivated()
     {
+        if (!Routing) return;  // the controller syncs the screensaver; the others follow it
         _ = _commands.Writer.TryWrite(async st =>
         {
             if (st.ScreensaverActive) return;
@@ -396,7 +616,7 @@ public class InputRouter(
 
     private void OnLockDetected()
     {
-        if (!profile.ScreenLockPropagation) return;
+        if (!Routing || !profile.ScreenLockPropagation) return;
         _ = _commands.Writer.TryWrite(async st =>
         {
             log.LogInformation("Machine locked — propagating to slaves");
@@ -423,8 +643,10 @@ public class InputRouter(
         relay.Send(hosts, payload);
     }
 
-    // sends master's clipboard hash to slave; slave decides whether to request the full push
-    private void PushClipboardToHost(string host)
+    // sends master's clipboard hash to slave; slave decides whether to request the full push.
+    // reads the clipboard off the consumer -- this runs on every screen crossing, and on Windows a
+    // clipboard read can block for as long as the app that owns the clipboard takes to answer.
+    private void PushClipboardToHost(string host) => OffLoop(() =>
     {
         try
         {
@@ -439,10 +661,10 @@ public class InputRouter(
         {
             log.LogWarning(ex, "Failed to send clipboard hash to {Host}", host);
         }
-    }
+    });
 
     // slave has compared hashes and determined it needs our clipboard; send the full push
-    private void OnClipboardPullRequest(string host)
+    private void OnClipboardPullRequest(string host) => OffLoop(() =>
     {
         try
         {
@@ -455,16 +677,17 @@ public class InputRouter(
         {
             log.LogWarning(ex, "Failed to push clipboard to {Host}", host);
         }
-    }
+    });
 
-    private void PullClipboardFromHost(string host)
+    // also off the consumer, and for the same reason: this runs on every crossing back.
+    private void PullClipboardFromHost(string host) => OffLoop(() =>
     {
         log.LogDebug("Pulling clipboard from {Host}", host);
         _lastPulledFrom = host;
         var localClip = ClipboardUtils.ReadWithFallback(_clipboardSync, _lastReceived, log, "pull");
         var masterHash = ClipboardUtils.ClipboardHash(localClip);
         relay.Send([host], MessageSerializer.Encode(MessageKind.ClipboardPull, new ClipboardPullMessage(masterHash)));
-    }
+    });
 
     private async Task OnMessageReceived(string sourceHost, MessageKind kind, ReadOnlyMemory<byte> body)
     {
@@ -489,6 +712,9 @@ public class InputRouter(
             case MessageKind.SlaveLog:
                 var entry = body.ParseMessage<SlaveLogMessage>(log, $"SlaveLog from {sourceHost}");
                 if (entry != null) ForwardSlaveLog(sourceHost, entry);
+                break;
+            case MessageKind.CursorPosition:
+                ReconcileCursor(sourceHost, body);
                 break;
             case MessageKind.ScreensaverSync:
                 break; // master never acts on screensaver sync messages
@@ -525,7 +751,7 @@ public class InputRouter(
                     log.LogDebug("Clipboard pull response from {Host}: text={TextLen}, primary={PrimaryLen}, image={ImageLen}",
                         sourceHost, clip.Text?.Length, clip.PrimaryText?.Length, clip.ImagePng?.Length);
                     var validated = ClipboardUtils.ValidateFields(clip.Text, clip.PrimaryText, clip.ImagePng, clip.Html, clip.Rtf, log, "pull response", sourceHost);
-                    _clipboardSync.SetClipboard(validated);
+                    OffLoop(() => _clipboardSync.SetClipboard(validated));
                     // if cursor is currently on a remote screen, forward the clipboard to it
                     var activeHost = await RunFence(st =>
                     {
@@ -632,6 +858,25 @@ public class InputRouter(
         foreach (var key in st.RelativeMouseScreens.Keys.Where(k => !validNames.Contains(k)).ToList())
             st.RelativeMouseScreens.Remove(key);
 
+        // The park point is the middle of a local screen, and it is where the pointer is physically
+        // held while it is away on another computer. A monitor changing hands takes that screen with
+        // it, and warping to the middle of a display that no longer exists lands the cursor wherever
+        // the desktop clamps it to -- after which every movement is measured against an anchor the
+        // cursor is not sitting on, comes out as an impossible jump, and is discarded as bogus. The
+        // mouse goes dead while still being swallowed. So the park point is re-derived here, and if
+        // the pointer is away the cursor is moved onto it, so that anchor and cursor still agree.
+        if (st.ActiveLocalScreen != null)
+        {
+            var (parkedX, parkedY) = (st.WarpX, st.WarpY);
+            UpdateWarpPoint(st, st.ActiveLocalScreen);
+            if (st.Mouse.IsOnVirtualScreen && (st.WarpX != parkedX || st.WarpY != parkedY))
+            {
+                platform.WarpCursor(st.WarpX, st.WarpY);
+                st.LastWarpX = st.WarpX;
+                st.LastWarpY = st.WarpY;
+            }
+        }
+
         // The pointer is out on another computer's screen and the layout it relied on to get back has
         // just been replaced. If the screen is gone, or the new layout gives it no edges, it is
         // stranded — and this computer hid its cursor when the pointer left, so it is invisible as
@@ -725,9 +970,13 @@ public class InputRouter(
 
     private void OnKeyEvent(KeyEvent keyEvent)
     {
+        // Not the controller: every key is this machine's own. Not forwarded, not swallowed by a
+        // hotkey, and not read for a file copy the user meant for their own file manager.
+        if (!Routing) return;
+
         var label = keyEvent.Character.HasValue ? $" '{keyEvent.Character}'" : keyEvent.Key.HasValue ? $" {keyEvent.Key}" : "";
 
-        _ = _commands.Writer.TryWrite(async st =>
+        PostInput(async st =>
         {
             st.LastInputTick = _getTickCount();
             await activityTracker.LocalActivity();
@@ -932,24 +1181,29 @@ public class InputRouter(
         }
 
         if (!_selectionDetector.IsFileTransferSupported) return;
-        var result = _selectionDetector.GetSelectedPaths();
-        if (!result.FileManagerFocused)
-        {
-            // Copying text must never cause a stale file selection to hijack Paste.
-            _fileTransfer.ClearCopyBuffer();
-            return;
-        }
 
-        if (result.Paths is { Count: > 0 })
+        // Asking the file manager what is selected is COM into Explorer, and Explorer answers when
+        // it feels like it. Doing that here used to hold up every queued keystroke and mouse move
+        // behind one Ctrl+C -- which, with the pointer away and the hooks swallowing on this loop's
+        // behalf, is how a copy could take the keyboard with it.
+        OffLoop(() =>
         {
+            var result = _selectionDetector.GetSelectedPaths();
+            if (!result.FileManagerFocused || result.Paths is not { Count: > 0 })
+            {
+                // Copying text must never cause a stale file selection to hijack Paste.
+                _fileTransfer.ClearCopyBuffer();
+                return;
+            }
+
             _fileTransfer.SetCopyBuffer(profile.Name, result.Paths);
             var n = result.Paths.Count;
-            ShowOsd(st, $"{n} {(n == 1 ? "item" : "items")} copied");
-        }
-        else
-        {
-            _fileTransfer.ClearCopyBuffer();
-        }
+            _ = _commands.Writer.TryWrite(inner =>
+            {
+                ShowOsd(inner, $"{n} {(n == 1 ? "item" : "items")} copied");
+                return ValueTask.CompletedTask;
+            });
+        });
     }
 
     private bool PasteFocusedFileCopy(LocalMasterState st)
@@ -964,14 +1218,22 @@ public class InputRouter(
 
         log.LogInformation("Paste: {Count} file(s) from {Source} → focused computer {Target}",
             copyBuffer.Paths.Length, copyBuffer.SourceHost, targetHost);
-        if (!_fileTransfer.InitiatePaste(copyBuffer, targetHost, profile.Name, relay))
-            SendOsd(targetHost, "Open a folder before pasting files");
+        // Starting the paste asks the file manager where it is pointed, which is the same blocking
+        // call into Explorer that Ctrl+C makes. The decision above is cheap and stays here, because
+        // the caller needs it now to know whether to also pass Ctrl+V on to the remote; only the
+        // slow half goes off the loop. Its answer never fed that decision -- it only picks an OSD.
+        OffLoop(() =>
+        {
+            if (!_fileTransfer.InitiatePaste(copyBuffer, targetHost, profile.Name, relay))
+                SendOsd(targetHost, "Open a folder before pasting files");
+        });
         return true;
     }
 
     private void OnMouseButton(MouseButtonEvent e)
     {
-        _ = _commands.Writer.TryWrite(async st =>
+        if (!Routing) return;
+        PostInput(async st =>
         {
             st.LastInputTick = _getTickCount();
             await activityTracker.LocalActivity();
@@ -985,7 +1247,8 @@ public class InputRouter(
 
     private void OnMouseScroll(MouseScrollEvent e)
     {
-        _ = _commands.Writer.TryWrite(async st =>
+        if (!Routing) return;
+        PostInput(async st =>
         {
             st.LastInputTick = _getTickCount();
             await activityTracker.LocalActivity();
@@ -1060,7 +1323,8 @@ public class InputRouter(
 
     private void OnMouseMove(double x, double y)
     {
-        _ = _commands.Writer.TryWrite(async st =>
+        if (!Routing) return;
+        PostInput(async st =>
         {
             st.LastInputTick = _getTickCount();
             await activityTracker.LocalActivity();
@@ -1104,6 +1368,11 @@ public class InputRouter(
         st.LastWarpX = st.WarpX;
         st.LastWarpY = st.WarpY;
         await platform.WarpToPark(st.WarpX, st.WarpY);
+        // The pointer is on its way to the park; the event that captures it arriving is not a user
+        // movement, so it is re-anchored rather than applied. Every movement after that is the
+        // user's, and none is dropped — a dropped movement is exactly what strands the pointer on a
+        // remote screen with no way back to the edge it came from.
+        st.SuppressNextMove = true;
         log.LogInformation("Entered remote screen '{Name}' → ({X}, {Y})", hit.Destination.Name, hit.EntryX, hit.EntryY);
         SendEnterScreen(hit.Destination, hit.EntryX, hit.EntryY);
     }
@@ -1116,8 +1385,21 @@ public class InputRouter(
         // zero-delta filter (also catches Mac/Windows warp events which arrive at WarpX,WarpY)
         if (dx == 0 && dy == 0) return;
 
-        // bogus filter: drop delta that looks like a warp-displacement artifact
-        if (Math.Abs(dx) > st.HalfW - 10 || Math.Abs(dy) > st.HalfH - 10) return;
+        // The event right after the entry warp is usually the pointer arriving at the park, not a user
+        // movement — if it is a big jump (the park was clamped to a different spot), re-anchor to
+        // wherever it actually landed and ignore it. A small first delta is the user's own nudge
+        // and is applied like any other: no size filter, because dropping a fast flick is what
+        // strands the pointer on a remote screen with no reliable way back.
+        if (st.SuppressNextMove)
+        {
+            st.SuppressNextMove = false;
+            if (Math.Abs(dx) > st.HalfW - 10 || Math.Abs(dy) > st.HalfH - 10)
+            {
+                st.LastWarpX = x;
+                st.LastWarpY = y;
+                return;
+            }
+        }
 
         var prevScreen = st.Mouse.ApplyDelta(dx, dy);
         if (prevScreen != null)
@@ -1232,6 +1514,90 @@ public class InputRouter(
         else cursorHider.Show();
     }
 
+    // The slave reports where its pointer actually is, whenever it is not where the master placed
+    // it (the machine's own trackpad moved it, an app grabbed it). Snap the virtual pointer to
+    // reality, then check the return edge immediately — a pointer parked at a crossing that leads
+    // home comes straight back, instead of waiting for a delta that may never line up.
+    private void ReconcileCursor(string sourceHost, ReadOnlyMemory<byte> body)
+    {
+        var msg = body.ParseMessage<CursorPositionMessage>(log, $"CursorPosition from {sourceHost}");
+        if (msg == null) return;
+        _ = RunFence(st =>
+        {
+            if (!st.Mouse.IsOnVirtualScreen || st.Mouse.CurrentScreen == null) return ValueTask.CompletedTask;
+            if (!st.Mouse.CurrentScreen.Host.Equals(sourceHost, StringComparison.OrdinalIgnoreCase)) return ValueTask.CompletedTask;
+            if (!st.Mouse.CurrentScreen.Name.EqualsIgnoreCase(msg.Screen)) return ValueTask.CompletedTask;
+
+            st.Mouse.SetPosition(msg.X, msg.Y);
+
+            if (st.Layout?.DetectEdgeExit(st.Mouse.CurrentScreen, (int)st.Mouse.X, (int)st.Mouse.Y) is { } hit)
+                TryReturnViaEdge(st, hit, $"reconciled from {sourceHost}");
+            return ValueTask.CompletedTask;
+        });
+    }
+
+    // The beat: every ~400ms, while the pointer is on a remote screen, re-check the position we
+    // hold — kept fresh by the slave's periodic reports — against the return edges. A pointer the
+    // user parked at a crossing comes home even if no delta and no drift report ever fired.
+    private void CheckReturnHome()
+    {
+        _ = RunFence(st =>
+        {
+            if (!st.Mouse.IsOnVirtualScreen || st.Mouse.CurrentScreen == null) return ValueTask.CompletedTask;
+            if (platform.AnyMouseButtonHeld()) return ValueTask.CompletedTask;
+            if (st.Layout?.DetectEdgeExit(st.Mouse.CurrentScreen, (int)st.Mouse.X, (int)st.Mouse.Y) is { } hit)
+                TryReturnViaEdge(st, hit, "interval check");
+            return ValueTask.CompletedTask;
+        });
+    }
+
+    // Shared by the delta path, the position reconcile and the interval beat: leave a remote screen
+    // through the crossing the pointer sits on, and land on the local screen at the crossing's
+    // entry point. A button being held is the one case that must not cross — the user is dragging.
+    private void TryReturnViaEdge(LocalMasterState st, EdgeHit hit, string via)
+    {
+        if (!hit.Destination.IsLocal || st.LockedToScreen || platform.AnyMouseButtonHeld()) return;
+        var targetScreen = hit.Destination;
+        FlushMouseDelta(st);
+        var globalX = targetScreen.X + hit.EntryX;
+        var globalY = targetScreen.Y + hit.EntryY;
+        var leavingScreen = st.Mouse.CurrentScreen;
+        st.Mouse.LeaveScreen();
+        ReturnToLocalScreen(globalX, globalY);
+        ShowCursorOnReturn();
+        st.ActiveLocalScreen = targetScreen;
+        UpdateWarpPoint(st, targetScreen);
+        log.LogInformation("Returned to local screen ← ({X}, {Y}) ({Via})", globalX, globalY, via);
+        if (relay.IsConnected && leavingScreen != null)
+            LeaveRemoteScreen(leavingScreen.Host);
+    }
+
+    // Troubleshooting: restore this computer's cursor unconditionally. If the pointer is stranded
+    // on a remote screen (its cursor is hidden here), bring it home first.
+    public void ResetCursorState()
+    {
+        // The OS cursor can be left blank by a previous instance that died mid-crossing — the
+        // system cursor is replaced (Windows) or ref-counted-hidden (macOS), and no owner remains
+        // to put it back. Force-restore regardless of what this process believes.
+        try
+        {
+            if (OperatingSystem.IsWindows()) Hydra.Platform.Windows.WindowsCursorSnapshot.RestoreDefaults();
+            if (OperatingSystem.IsMacOS()) Hydra.Platform.MacOs.NativeMethods.CGDisplayShowCursor(Hydra.Platform.MacOs.NativeMethods.CGMainDisplayID());
+        }
+        catch (Exception ex) { log.LogWarning(ex, "Could not force-restore the OS cursor"); }
+        _ = RunFence(st =>
+        {
+            var left = LeaveVirtualScreen(st, out var homeX, out var homeY);
+            if (left != null)
+            {
+                ReturnToLocalScreen(homeX, homeY);
+                log.LogWarning("Cursor reset: the pointer was on {Host} — brought it home", left);
+            }
+            cursorHider.Show();
+            return ValueTask.CompletedTask;
+        });
+    }
+
     // shared in-consumer cleanup for peer-disconnect / relay-disconnect / screensaver snap-back.
     // returns the host we left (null if already on local screen).
     private static string? LeaveVirtualScreen(LocalMasterState st, out int warpX, out int warpY)
@@ -1274,7 +1640,8 @@ public class InputRouter(
     // feeds directly into VirtualMouseState — no warp-point math needed.
     private void OnMouseDelta(double dx, double dy)
     {
-        _ = _commands.Writer.TryWrite(async st =>
+        if (!Routing) return;
+        PostInput(async st =>
         {
             st.LastInputTick = _getTickCount();
             await activityTracker.LocalActivity();
@@ -1384,6 +1751,9 @@ public class InputRouter(
         st.HalfH = screen.Height / 2;
         st.WarpX = screen.X + st.HalfW;
         st.WarpY = screen.Y + st.HalfH;
+        // published for CheckForStall, which runs off the consumer and so cannot read st
+        Volatile.Write(ref _parkX, st.WarpX);
+        Volatile.Write(ref _parkY, st.WarpY);
         cursorHider.UpdateWarpPoint(st.WarpX, st.WarpY);
     }
 
@@ -1417,6 +1787,9 @@ public class InputRouter(
         public VirtualMouseState Mouse = new();
         public int WarpX, WarpY, HalfW, HalfH;
         public double LastWarpX, LastWarpY;
+        // true right after the entry warp: the pointer is still arriving at the park point, so the
+        // next captured position is not a user movement — re-anchor to it instead of applying it
+        public bool SuppressNextMove;
         public long LastVirtualLogTick;
         public bool LockedToScreen;
         // remote-only with no local screen: confine the cursor to the current remote screen.

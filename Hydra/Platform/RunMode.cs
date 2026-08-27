@@ -10,4 +10,9 @@ internal static class RunMode
     internal static readonly int MainThreadId = Environment.CurrentManagedThreadId;
 
     internal static bool OnMainThread => Environment.CurrentManagedThreadId == MainThreadId;
+
+    // Whether this process can put a window on a screen. Headless Linux has no display to put one
+    // on; everywhere else the tray is running and Avalonia is up.
+    internal static bool CanShowWindows =>
+        !OperatingSystem.IsLinux() || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY"));
 }

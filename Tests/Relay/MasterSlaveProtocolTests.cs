@@ -16,46 +16,6 @@ namespace Tests.Relay;
 [TestFixture]
 public class MasterSlaveProtocolTests
 {
-    // -- MasterRelayConnection message filtering --
-
-    [Test]
-    public async Task MasterRelay_PassesSlaveLogThrough()
-    {
-        var relay = new TestableMasterRelay();
-        var received = new List<MessageKind>();
-        relay.MessageReceived += async (_, kind, _) => { received.Add(kind); await ValueTask.CompletedTask; };
-
-        var msg = new SlaveLogMessage(2, "cat", "hello", null);
-        await relay.SimulateReceive("slave-pc", MessageKind.SlaveLog, JsonSerializer.Serialize(msg, SaneJson.Options));
-
-        Assert.That(received, Is.EqualTo([MessageKind.SlaveLog]));
-    }
-
-    [Test]
-    public async Task MasterRelay_DropsMasterConfig()
-    {
-        var relay = new TestableMasterRelay();
-        var received = new List<MessageKind>();
-        relay.MessageReceived += async (_, kind, _) => { received.Add(kind); await ValueTask.CompletedTask; };
-
-        await relay.SimulateReceive("other-master", MessageKind.MasterConfig, "{}");
-
-        Assert.That(received, Is.Empty);
-    }
-
-    [Test]
-    public async Task MasterRelay_PassesScreenInfoThrough()
-    {
-        var relay = new TestableMasterRelay();
-        var received = new List<MessageKind>();
-        relay.MessageReceived += async (_, kind, _) => { received.Add(kind); await ValueTask.CompletedTask; };
-
-        var info = new ScreenInfoMessage([new ScreenInfoEntry("screen:0", 0, 0, 1920, 1080, 1.0m)]);
-        await relay.SimulateReceive("slave-pc", MessageKind.ScreenInfo, JsonSerializer.Serialize(info, SaneJson.Options));
-
-        Assert.That(received, Is.EqualTo([MessageKind.ScreenInfo]));
-    }
-
     // -- slave log end-to-end through InputRouter --
 
     [Test]
@@ -275,17 +235,6 @@ public class MasterSlaveProtocolTests
 
     private static List<string> MasterConfigTargets(FakeRelay relay) =>
         [.. relay.Sent.Where(s => s.Kind == MessageKind.MasterConfig).SelectMany(s => s.Targets)];
-
-    private sealed class TestableMasterRelay : MasterRelayConnection
-    {
-        public TestableMasterRelay() : base(
-            TransitionTestHelper.Profile("master", new HydraConfig { Mode = Mode.Master }),
-            NullLogger<RelayConnection>.Instance,
-            new WorldState())
-        { }
-
-        public Task SimulateReceive(string host, MessageKind kind, string json) => OnReceive(host, kind, Encoding.UTF8.GetBytes(json));
-    }
 
     private sealed class LogCapture : ILoggerFactory
     {

@@ -79,18 +79,27 @@ public static class DeskMerge
                     entry = Create(working, aliases, ref changed);
                 }
                 changed |= entry.Apply(host, monitor.DdcId, ScreenKey(screen), aliases, screen, monitor.SupportedInputs);
-                Record(claims, entry.Id, new Claim(host, monitor.CurrentInput, ViaDdc: true));
+                Record(claims, entry.Id, new Claim(host, monitor.CurrentInput, ViaDdc: true, ViaScreen: screen != null));
             }
 
             // Panels that answer no DDC — a laptop display, or a monitor whose helper is missing.
-            // They still belong on the desk; they are just not switchable.
+            // They still belong on the desk; they are just not switchable. A screen with no name at
+            // all is skipped: it is a transient enumeration (a monitor mid-switch, a link flapping)
+            // and there is nothing to identify it by, so placing it only invents a phantom monitor.
             foreach (var screen in screens.Where(s => !claimedScreens.Contains(s.ScreenId)))
             {
                 var aliases = Aliases(null, screen);
-                var entry = Find(working, host, null, ScreenKey(screen), aliases)
-                            ?? Create(working, aliases.Count > 0 ? aliases : [$"{host} display"], ref changed);
+                var entry = Find(working, host, null, ScreenKey(screen), aliases);
+
+                // A nameless screen is not enough to invent a monitor from — a link flapping during
+                // a switch enumerates one for a moment — but it is enough to recognise one already
+                // on the desk, when the display server hands back an identifier that outlives the
+                // name. macOS stops naming a display it has just reconnected, and skipping it
+                // outright dropped a plainly lit panel off the desk along with its crossings.
+                if (entry == null && aliases.Count == 0) continue;
+                entry ??= Create(working, aliases, ref changed);
                 changed |= entry.Apply(host, null, ScreenKey(screen), aliases, screen, null);
-                Record(claims, entry.Id, new Claim(host, null, ViaDdc: false));
+                Record(claims, entry.Id, new Claim(host, null, ViaDdc: false, ViaScreen: true));
             }
         }
 
@@ -100,6 +109,19 @@ public static class DeskMerge
         // already registered under "AORUS FI27Q-X".
         changed |= Coalesce(working, claims);
 
+        // A monitor that exists only because a transient, nameless screen was seen once (a link
+        // flapping during a switch) has no identity — no DDC id, no input, no reports — and
+        // nothing to place. Real monitors always carry at least a DDC id or an input, so dropping
+        // an entry every source lacks both on is safe, and it stops a phantom "Mac display"
+        // lingering in every settings window.
+        foreach (var orphan in working.Where(w =>
+            !claims.ContainsKey(w.Id)
+            && w.Sources.All(s => string.IsNullOrWhiteSpace(s.DdcId) && s.Input == null)).ToList())
+        {
+            working.Remove(orphan);
+            changed = true;
+        }
+
         var active = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var monitor in working)
         {
@@ -107,6 +129,7 @@ public static class DeskMerge
             var (host, learned) = Resolve(monitor, monitorClaims);
             if (host != null) active[monitor.Id] = host;
             if (learned != null) changed |= monitor.Learn(learned.Value.Host, learned.Value.Input);
+            changed |= monitor.NoteSignalFollowing(monitorClaims);
         }
 
         changed |= Place(working, active);
@@ -120,14 +143,15 @@ public static class DeskMerge
             w.Sources
                 .OrderBy(s => s.Host, StringComparer.OrdinalIgnoreCase)
                 .Select(s => new DeskSourceView(s.Host, s.Input, Same(active.GetValueOrDefault(w.Id), s.Host), s.AvailableInputs))
-                .ToList()))
+                .ToList(),
+            w.Sleeping))
             .OrderBy(v => v.DeskX).ThenBy(v => v.DeskY)
             .ToList();
 
         return new DeskMergeResult(monitors, views, changed);
     }
 
-    private record Claim(string Host, int? CurrentInput, bool ViaDdc);
+    private record Claim(string Host, int? CurrentInput, bool ViaDdc, bool ViaScreen);
 
     private static void Record(Dictionary<string, List<Claim>> claims, string id, Claim claim)
     {
@@ -161,12 +185,25 @@ public static class DeskMerge
     private static (string? Host, (string Host, int Input)? Learned) Resolve(Builder monitor, List<Claim> claims)
     {
         var present = claims.Select(c => c.Host).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var readings = claims.Where(c => c.ViaDdc && c.CurrentInput is >= 0 and <= 255).ToList();
+        // A reading the monitor itself does not admit to is not a reading — helpers misresolve
+        // displays (m1ddc answers the built-in's code for a different panel's UUID) and a monitor
+        // mid-scan reports inputs it does not have. Trust a VCP value only when it is one of the
+        // monitor's known codes, or — when nothing is known about its codes — when it is at least
+        // a code an input could have.
+        var knownInputs = monitor.Sources.SelectMany(s => s.AvailableInputs).Distinct().ToList();
+        var readings = claims.Where(c => c.ViaDdc && c.CurrentInput is { } value
+            && (knownInputs.Count == 0 ? PlausibleInput(value) : knownInputs.Contains(value))).ToList();
 
         // Nothing readable — a panel that answers no DDC, or a helper that is missing. Whoever is
         // here is the best answer there is, and with one computer it is a certain one.
         if (readings.Count == 0)
         {
+            // The computer that lists the monitor as one of its screens is showing it — the screen
+            // list only contains displays actually driving a signal. That beats the fallback below,
+            // which names the alphabetically-first DDC claimant and is wrong whenever two computers
+            // are merely connected to the panel but neither could read its input.
+            var onScreen = claims.Where(c => c.ViaScreen).Select(c => c.Host).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (onScreen.Count == 1) return (onScreen[0], null);
             var reader = claims.FirstOrDefault(c => c.ViaDdc)?.Host;
             return (reader ?? present.FirstOrDefault(), null);
         }
@@ -185,9 +222,17 @@ public static class DeskMerge
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         if (unnamedReaders.Count == 1)
-            return Supported(monitor, live)
+        {
+            // A code is only learned when the computer is actually showing the panel: a monitor
+            // parked on a dead socket (the desk once sent it to an input nothing drives) still
+            // answers DDC, and the value it reads then would be learned and sent again forever.
+            // The screen only exists while the computer drives the panel, so it is the evidence
+            // that the input was right — and the desk never learns a socket that leads to black.
+            var onScreen = readings.Any(c => c.ViaScreen && Same(c.Host, unnamedReaders[0]));
+            return onScreen && Supported(monitor, live)
                 ? (unnamedReaders[0], (unnamedReaders[0], live))
                 : (unnamedReaders[0], null);
+        }
 
         // Every computer that can read it already knows its own code, and this is none of them — so
         // the monitor is showing someone else. If exactly one computer here is still unidentified,
@@ -222,8 +267,18 @@ public static class DeskMerge
     private static bool Supported(Builder monitor, int input)
     {
         var known = monitor.Sources.SelectMany(s => s.AvailableInputs).Distinct().ToList();
-        return known.Count == 0 || known.Contains(input);
+        return known.Count == 0 ? PlausibleInput(input) : known.Contains(input);
     }
+
+    // MCCS gives VCP 0x60 the values 0x01–0x12: the two VGAs, the two DVIs, composite, S-video,
+    // tuner, component, the two DisplayPorts and the two HDMIs. Anything outside that is not an
+    // input, and when a monitor has published no capabilities string there is nothing else to check
+    // a reading against — which is how a helper answering the same number for every display it is
+    // asked about got that number written down as a real socket. m1ddc returns 96 — 0x60, the code
+    // itself — for a UUID it cannot resolve, so one Mac learned "input 96" for its built-in panel
+    // and for the BenQ beside it, and switching either one to 96 selects nothing: the panel goes
+    // grey, and the desk believes the code indefinitely because a wrong code cannot be re-derived.
+    internal static bool PlausibleInput(int input) => input is >= 0x01 and <= 0x12;
 
     // -- identity --------------------------------------------------------------------------------
 
@@ -304,7 +359,25 @@ public static class DeskMerge
 
     private static Builder? Find(List<Builder> working, string host, string? ddcId, string? screenId, List<string> aliases)
     {
-        // An identifier this host already recorded is the strongest match.
+        // A real model name is the strongest identity. The GDI device name ("\\.\DISPLAY1") shifts
+        // whenever displays are enabled or disabled — the monitor that remains takes over the freed
+        // number — so matching on it first can hand one monitor's report to the wrong entry and
+        // fold two panels together. The model name is physical; the device name is the address it
+        // happens to have right now. A report with only generic names (e.g. "Generic PnP Monitor")
+        // has no name to match on, so it falls through to the identifier.
+        if (aliases.Any(Names))
+        {
+            // The cleanest identity wins: an entry that accumulated two monitors' model names is a
+            // broken leftover, and a report carrying one of those names must reach the entry that
+            // is just that monitor — not the one that absorbed it.
+            var byName = working
+                .Where(w => SameMonitor(w.Aliases, aliases))
+                .OrderByDescending(w => DistinctModels(w.Aliases).Count)
+                .FirstOrDefault();
+            if (byName != null) return byName;
+        }
+
+        // An identifier this host already recorded is the next-best match.
         var byId = working.FirstOrDefault(w => w.Sources.Any(s =>
             Same(s.Host, host)
             && ((ddcId != null && Same(s.DdcId, ddcId)) || (screenId != null && Same(s.ScreenId, screenId)))));
@@ -405,7 +478,8 @@ public static class DeskMerge
         {
             for (var j = working.Count - 1; j > i; j--)
             {
-                if (!SameMonitor(working[i].Aliases, working[j].Aliases)) continue;
+                if (!SameMonitor(working[i].Aliases, working[j].Aliases)
+                    && !SamePanel(working[i], working[j])) continue;
                 working[i].Absorb(working[j]);
                 if (claims != null && claims.Remove(working[j].Id, out var moved))
                     foreach (var claim in moved) Record(claims, working[i].Id, claim);
@@ -415,6 +489,31 @@ public static class DeskMerge
         }
         return changed;
     }
+
+    // Two entries that one computer recorded under the same DDC id (or screen id) describe the
+    // same panel. This is how a nameless "Generic PnP Monitor" entry is folded into the entry the
+    // other computer registered under the model name — the report that carried the model name has
+    // given that entry the same device name by then.
+    //
+    // Two entries that each carry a distinct model name are different monitors and must never be
+    // folded, whatever identifiers they share — a device name can shift from one monitor to
+    // another when a display is disabled, and folding on it then deletes a real monitor.
+    private static bool SamePanel(Builder a, Builder b)
+    {
+        var modelsA = DistinctModels(a.Aliases);
+        var modelsB = DistinctModels(b.Aliases);
+        if (modelsA.Count > 0 && modelsB.Count > 0 && modelsA.Count != modelsB.Count) return false;
+        if (modelsA.Count > 0 && modelsB.Count > 0 && !modelsA.SetEquals(modelsB)) return false;
+
+        return a.Sources.Any(sa => b.Sources.Any(sb =>
+            Same(sa.Host, sb.Host)
+            && ((sa.DdcId != null && Same(sa.DdcId, sb.DdcId)) || (sa.ScreenId != null && Same(sa.ScreenId, sb.ScreenId)))));
+    }
+
+    // The distinct human model names among aliases — "AORUS FI27Q-X" and "XL2410T", with generic
+    // names and opaque ids dropped. Used to tell "two names for one panel" from "two panels".
+    private static HashSet<string> DistinctModels(IEnumerable<string> aliases) =>
+        aliases.Where(a => Names(a)).Select(Normalise).ToHashSet();
 
     // -- layout ----------------------------------------------------------------------------------
 
@@ -503,6 +602,8 @@ public static class DeskMerge
         public bool Placed { get; set; }
         public int ScreenX { get; set; }
         public int ScreenY { get; set; }
+        public bool Sleeping { get; set; }
+        public bool FollowsTheSignal { get; set; }
         public List<Source> Sources { get; } = [];
 
         public static Builder From(DeskMonitorConfig config)
@@ -516,6 +617,8 @@ public static class DeskMerge
                 Width = config.Width,
                 Height = config.Height,
                 Placed = config.Width > 0,
+                Sleeping = config.Sleeping,
+                FollowsTheSignal = config.FollowsTheSignal,
             };
             // Older desks stored no aliases; the label is the only name they knew it by.
             builder.Aliases.AddRange(config.Aliases.Count > 0 ? config.Aliases : [config.Label ?? config.Id]);
@@ -534,6 +637,7 @@ public static class DeskMerge
                 if (!Aliases.Any(a => string.Equals(a, alias, StringComparison.OrdinalIgnoreCase))) Aliases.Add(alias);
             if (DeskMerge.BestLabel(Aliases) is { } better) Label = better;
             if (Width <= 0) { Width = other.Width; Height = other.Height; }
+            FollowsTheSignal |= other.FollowsTheSignal;
             if (!Placed && other.Placed) { DeskX = other.DeskX; DeskY = other.DeskY; Placed = true; }
 
             foreach (var source in other.Sources)
@@ -545,6 +649,30 @@ public static class DeskMerge
                 mine.ScreenId ??= source.ScreenId;
                 if (mine.AvailableInputs.Count == 0) mine.AvailableInputs = source.AvailableInputs;
             }
+        }
+
+        // A computer driving this panel *and* able to talk DDC to it is looking at its own input, so
+        // the monitor can name the code that selects it. One that answers something no input could
+        // be is saying it does not implement input select at all: a BenQ XL2420T reports its
+        // luminance and contrast happily and returns 0x60 itself when asked what it is on.
+        //
+        // Only that pairing is evidence. A reading from a computer that is not on screen proves
+        // nothing, and neither does silence. Re-derived every round rather than latched, so one
+        // bad reading cannot condemn a monitor to the slow path forever.
+        public bool NoteSignalFollowing(List<Claim> claims)
+        {
+            var witnesses = claims.Where(c => c.ViaDdc && c.ViaScreen).ToList();
+            if (witnesses.Count == 0) return false;
+
+            // No usable answer is the same answer however it arrives. The two helpers fail
+            // differently — m1ddc hands back 0x60 itself, and Windows' GetVCPFeature simply says
+            // no, which reaches here as nothing at all — so accepting only the junk value meant
+            // this was detectable from a Mac and invisible from the PC. That is how the panel with
+            // no DDC hardware got recognised while the monitor it was sat next to did not.
+            var follows = witnesses.All(c => c.CurrentInput is not { } value || !PlausibleInput(value));
+            if (follows == FollowsTheSignal) return false;
+            FollowsTheSignal = follows;
+            return true;
         }
 
         public bool Learn(string host, int input)
@@ -601,6 +729,8 @@ public static class DeskMerge
             DeskY = DeskY,
             Width = Width,
             Height = Height,
+            Sleeping = Sleeping,
+            FollowsTheSignal = FollowsTheSignal,
             Sources = Sources.Select(s => new MonitorSourceConfig
             {
                 Host = s.Host, Input = s.Input, DdcId = s.DdcId, ScreenId = s.ScreenId,

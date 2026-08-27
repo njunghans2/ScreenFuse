@@ -148,6 +148,10 @@ public sealed class CoalescingOutputWrapper : IPlatformOutput
     public bool IsAccessibilityTrusted() => _inner.IsAccessibilityTrusted();
     public Task WaitForAccessibilityTrusted(CancellationToken cancel) => _inner.WaitForAccessibilityTrusted(cancel);
 
+    // The real cursor position lives on the native output; without this delegation the wrapper
+    // answered the interface's default — null — and every position report silently died here.
+    public (int X, int Y)? GetCursorPosition() => _inner.GetCursorPosition();
+
     public void Dispose()
     {
         FlushPendingMoveToQueue(); // deliver any final pending move

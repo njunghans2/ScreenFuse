@@ -95,6 +95,16 @@ public sealed class MacOutputHandler : IPlatformOutput, ICursor
 
     public void MoveMouseRelative(int dx, int dy)
     {
+        // The tracked position goes stale the moment the user touches the trackpad: the OS cursor
+        // moves without telling this app, and a relative move from the stale anchor lands the
+        // cursor somewhere else entirely — the pointer jitters, sticks, and fights the hand that
+        // moved it. Anchor every relative move at the cursor's real position, then apply the
+        // delta the master routed.
+        if (GetCursorPosition() is { } real)
+        {
+            _mouseX = real.X;
+            _mouseY = real.Y;
+        }
         _mouseX += dx;
         _mouseY += dy;
         _mousePositionInitialized = true;
@@ -288,14 +298,25 @@ public sealed class MacOutputHandler : IPlatformOutput, ICursor
     {
         if (msg.YDelta == 0 && msg.XDelta == 0) return;
 
+        // A real mouse wheel is a single-axis event (wheelCount 1), and macOS routes it straight
+        // down the vertical axis: views that can scroll both ways keep their predominant-axis
+        // behaviour exactly as if a mouse were plugged in. Sending wheelCount 2 with a zero
+        // horizontal axis makes those views (WebViews, tables, canvases) treat the wheel as a
+        // two-axis gesture and scroll unpredictably — the "weird" horizontal scrolling this fixes.
+        // Only a genuinely two-axis scroll (a tilt wheel, a trackpad) uses both axes.
+        var yLines = msg.YDelta / 120;
+        var xLines = msg.XDelta / 120;
+        var wheelCount = msg.XDelta != 0 ? 2u : 1u;
+
         // wire format: 120 = 1 line. convert to integer line counts for the event constructor.
         // kCGScrollEventUnitLine = 1
-        var eventRef = NativeMethods.CGEventCreateScrollWheelEvent(nint.Zero, 1, 2, msg.YDelta / 120, msg.XDelta / 120);
+        var eventRef = NativeMethods.CGEventCreateScrollWheelEvent(nint.Zero, 1, wheelCount, yLines, xLines);
         if (eventRef == nint.Zero) return;
 
         // set 16.16 fixed-point line deltas for sub-line precision (reverses input handler's fpDelta * 120 >> 16)
         NativeMethods.CGEventSetIntegerValueField(eventRef, NativeMethods.KCGScrollWheelEventFixedPtDeltaAxis1, (long)msg.YDelta * 65536 / 120);
-        NativeMethods.CGEventSetIntegerValueField(eventRef, NativeMethods.KCGScrollWheelEventFixedPtDeltaAxis2, (long)msg.XDelta * 65536 / 120);
+        if (wheelCount == 2)
+            NativeMethods.CGEventSetIntegerValueField(eventRef, NativeMethods.KCGScrollWheelEventFixedPtDeltaAxis2, (long)msg.XDelta * 65536 / 120);
 
         NativeMethods.CGEventPost(NativeMethods.KCGHidEventTap, eventRef);
         NativeMethods.CFRelease(eventRef);
@@ -664,13 +685,38 @@ public sealed class MacOutputHandler : IPlatformOutput, ICursor
     }
     public Task WaitForAccessibilityTrusted(CancellationToken cancel) => NativeMethods.WaitForAccessibilityTrusted(cancel);
 
+    // Returning null here is not a harmless "don't know": the position reports stop, the master's
+    // model of where this cursor is goes stale, and the crossing back never lines up. So the
+    // question is asked twice — once of the session's own event state, then of this app's event
+    // source — before giving up.
     public (int X, int Y)? GetCursorPosition()
     {
-        var eventRef = NativeMethods.CGEventCreate(nint.Zero);
-        if (eventRef == nint.Zero) return null;
-        var pos = NativeMethods.CGEventGetLocation(eventRef);
-        NativeMethods.CFRelease(eventRef);
-        return ((int)pos.X, (int)pos.Y);
+        try
+        {
+            var eventRef = NativeMethods.CGEventCreate(nint.Zero);
+            if (eventRef != nint.Zero)
+            {
+                var pos = NativeMethods.CGEventGetLocation(eventRef);
+                NativeMethods.CFRelease(eventRef);
+                return ((int)pos.X, (int)pos.Y);
+            }
+            if (EventSource != nint.Zero)
+            {
+                eventRef = NativeMethods.CGEventCreate(EventSource);
+                if (eventRef != nint.Zero)
+                {
+                    var pos = NativeMethods.CGEventGetLocation(eventRef);
+                    NativeMethods.CFRelease(eventRef);
+                    return ((int)pos.X, (int)pos.Y);
+                }
+            }
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Could not read the cursor position");
+            return null;
+        }
     }
 
     public ValueTask HideCursor()

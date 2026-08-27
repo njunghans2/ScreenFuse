@@ -52,6 +52,12 @@ public class SlaveRelayConnection : RelayConnection
 
     private readonly IActivityTracker _activityTracker;
 
+    // Reports the slave's real pointer position to the master(s), so the master can reconcile its
+    // virtual pointer with where the cursor actually is. A pointer moved locally (the machine's own
+    // trackpad, an app grabbing the cursor) would otherwise strand the crossing: the master's model
+    // says one place, the user sees another, and the return edges never line up.
+    private readonly System.Threading.Timer _positionTimer;
+
     // ReSharper disable once ConvertToPrimaryConstructor
 #pragma warning disable IDE0290
     public SlaveRelayConnection(IHydraProfile profile, ILogger<RelayConnection> log, IPlatformOutput output, IScreenDetector screens, IWorldState peerState, ICursorHider cursorHider, IScreenSaverSync screenSaverSync, IClipboardSync clipboardSync, FileTransferService fileTransfer, IFileSelectionDetector selectionDetector, IOsdNotification osd, IActivityTracker activityTracker, IDormancyState dormancy)
@@ -70,6 +76,18 @@ public class SlaveRelayConnection : RelayConnection
         _osd = osd;
         _activityTracker = activityTracker;
         _dormancy = dormancy;
+        _positionTimer = new System.Threading.Timer(_ => ReportCursorPosition(), null,
+            TimeSpan.FromSeconds(1), TimeSpan.FromMilliseconds(120));
+
+        profile.ControllerChanged += () =>
+        {
+            if (!_profile.IsController) return;
+            _ = Task.Run(async () =>
+            {
+                try { await OnBecameController(); }
+                catch (Exception ex) { _log.LogWarning(ex, "Could not clear the pointer state after taking control"); }
+            });
+        };
 
         _screens.ScreensChanged += async snapshot =>
         {
@@ -189,6 +207,10 @@ public class SlaveRelayConnection : RelayConnection
                 if (OnScreenMasterCount == 0 && _isReady)
                     _cursorHider.Hide();
                 break;
+            case MessageKind.CursorReset:
+                // Troubleshooting: the master asked every computer to make its cursor visible again.
+                _cursorHider.Show();
+                break;
             case MessageKind.ScreensaverSync:
                 var ss = body.ParseMessage<ScreensaverSyncMessage>(_log, kind.ToString());
                 if (ss != null)
@@ -288,6 +310,19 @@ public class SlaveRelayConnection : RelayConnection
                 await base.OnReceive(sourceHost, kind, body);
                 break;
         }
+    }
+
+    // Taking control while another computer's pointer is standing on this screen leaves that
+    // computer's claim behind: the cursor stays hidden and the keys stay held, waiting for a
+    // LeaveScreen from a machine that is no longer driving. The peer sends one as it steps down,
+    // but this machine must not depend on that message arriving to get its own cursor back.
+    internal async Task OnBecameController()
+    {
+        ClearOnScreenMasters();
+        await ReleaseAllKeys();
+        await _peerState.PruneMasters([]);
+        _cursorHider.Show();
+        _log.LogInformation("Took control — cleared any pointer that was standing on this computer");
     }
 
     protected override async Task OnDisconnected()
@@ -469,6 +504,12 @@ public class SlaveRelayConnection : RelayConnection
 
     private async Task HandleMasterConfig(string masterHost, ReadOnlyMemory<byte> body)
     {
+        // The computer holding the keyboard answers to nobody: MasterConfig is how a peer is told
+        // who the controller is, so accepting one here would file the sender as this machine's
+        // master and start shipping it logs. The old master-only connection class dropped these
+        // outright; the check is a reading of the role now, because the role can change.
+        if (_profile.IsController) return;
+
         var config = body.FromSaneJson<MasterConfigMessage>() ?? new MasterConfigMessage(null);
         var before = await _peerState.GetMasters();
         await _peerState.AddMaster(masterHost, config);
@@ -487,6 +528,57 @@ public class SlaveRelayConnection : RelayConnection
             _output.MoveMouse(screen.X + x, screen.Y + y);
         else
             _output.MoveMouse(x, y);
+        _lastPlaced = (screenName, x, y);
+    }
+
+    // where the master last placed our pointer, so position reports only go out when the pointer
+    // moved somewhere else (locally) — reporting the master's own placement back would just fight it.
+    private (string Screen, int X, int Y)? _lastPlaced;
+    private int _quietTicks;
+
+    // Sends the slave's actual pointer position to every master, throttled by the timer period.
+    // Screen-local coordinates, matching the MouseMove convention the master already uses. A
+    // pointer the master placed is not reported (it already knows); only drift — a locally moved
+    // pointer — is, so the master can snap its virtual pointer to reality and the return edges
+    // line up with what the user is looking at.
+    private async void ReportCursorPosition()
+    {
+        try
+        {
+            if (!_isReady || OnScreenMasterCount == 0 || _dormancy.IsDormant) return;
+            if (_output.GetCursorPosition() is not { } pos) return;
+            var snapshot = _cachedScreens;
+            var screen = snapshot?.Screens.FirstOrDefault(s =>
+                pos.X >= s.X && pos.X < s.X + s.Width && pos.Y >= s.Y && pos.Y < s.Y + s.Height);
+            if (screen == null) return;
+
+            var x = pos.X - screen.X;
+            var y = pos.Y - screen.Y;
+            // A pointer the master placed is not reported — it already knows where it put it. But a
+            // report that never leaves means a pointer parked *at* a return edge is never seen by
+            // the master, so every few ticks the position goes out regardless of drift: the master's
+            // interval check then brings a pointer that sits on a crossing home, even if nothing
+            // moved since the last placement.
+            if (_lastPlaced is { } placed && placed.Screen.EqualsIgnoreCase(screen.Name)
+                && Math.Abs(placed.X - x) <= 4 && Math.Abs(placed.Y - y) <= 4
+                && (++_quietTicks % 5 != 0)) return;
+            _quietTicks = 0;
+
+            var payload = MessageSerializer.Encode(MessageKind.CursorPosition,
+                new CursorPositionMessage(screen.Name, x, y));
+            foreach (var master in await _peerState.GetMasters())
+                Send([master], payload);
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Could not report the cursor position");
+        }
+    }
+
+    protected override Task OnShutdown(CancellationToken cancel)
+    {
+        _positionTimer.Dispose();
+        return base.OnShutdown(cancel);
     }
 
     private void SendScreenInfo(string masterHost, List<ScreenInfoEntry> entries)

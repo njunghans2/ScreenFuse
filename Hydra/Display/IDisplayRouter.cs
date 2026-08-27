@@ -32,4 +32,21 @@ public interface IDisplayRouter
     // computers with no DDC helper and monitors that ignore VCP 0x60. It is all of this computer's
     // displays or none, so it cannot hand over one monitor of several.
     Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default);
+
+    // Removes this computer's display for one monitor from (or restores it to) the desktop
+    // topology, so a display that switched to another computer stops being part of this one's
+    // desktop — windows and the pointer would otherwise keep living on its invisible area.
+    // localSourceId is this computer's identity for the monitor: a GDI device name on Windows
+    // ("\\.\DISPLAY1"), the display UUID on macOS.
+    Task<DisplayCommandResult> SetMonitorDisplayEnabledAsync(string localSourceId, bool enabled, CancellationToken cancellationToken = default);
+
+    // Blanks one panel (standby) or brings it back, without touching the desktop topology: the
+    // display stays exactly where it is. Used for the last display of an OS, which must never be
+    // removed — an OS with nothing to render is a soft-locked OS. On macOS the display-wide sleep
+    // is used, since panels there have no per-monitor DDC.
+    //
+    // Only for panels this computer alone drives. The Windows path is DDC, which addresses the
+    // monitor and not the cable, so a monitor another computer is showing goes black for them too —
+    // "stop this computer's output" is SetMonitorDisplayEnabledAsync or SetDisplayPowerAsync.
+    Task<DisplayCommandResult> SetDisplayStandbyAsync(string localSourceId, bool standby, CancellationToken cancellationToken = default);
 }

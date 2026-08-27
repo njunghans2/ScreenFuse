@@ -17,10 +17,14 @@ public sealed class WindowsInputHandler(ILogger<WindowsInputHandler> log, IHydra
     private Thread? _hookThread;
     private uint _hookThreadId;
     private readonly WinKeyResolver _keyResolver = new();
-    private Action<double, double>? _onMouseMove;
-    private Action<KeyEvent>? _onKeyEvent;
-    private Action<MouseButtonEvent>? _onMouseButton;
-    private Action<MouseScrollEvent>? _onMouseScroll;
+    // multicast: the symmetric pointer service and the router tap the same input, so each
+    // subscriber's callbacks must all run, not replace each other
+    private readonly List<Action<double, double>> _onMouseMove = [];
+    private readonly List<Action<double, double>> _onMouseDelta = [];
+    private readonly List<Action<KeyEvent>> _onKeyEvent = [];
+    private readonly List<Action<MouseButtonEvent>> _onMouseButton = [];
+    private readonly List<Action<MouseScrollEvent>> _onMouseScroll = [];
+    private readonly List<Action> _onLocalActivity = [];
     private readonly WindowsShieldWindow _shield = new();
     private int _lastWarpX = -1;
     private int _lastWarpY = -1;
@@ -77,10 +81,19 @@ public sealed class WindowsInputHandler(ILogger<WindowsInputHandler> log, IHydra
         Action<MouseScrollEvent> onMouseScroll,
         Action? onLocalActivity = null)
     {
-        _onMouseMove = onMouseMove;
-        _onKeyEvent = onKeyEvent;
-        _onMouseButton = onMouseButton;
-        _onMouseScroll = onMouseScroll;
+        _onMouseMove.Add(onMouseMove);
+        if (onMouseDelta != null) _onMouseDelta.Add(onMouseDelta);
+        _onKeyEvent.Add(onKeyEvent);
+        _onMouseButton.Add(onMouseButton);
+        _onMouseScroll.Add(onMouseScroll);
+        if (onLocalActivity != null) _onLocalActivity.Add(onLocalActivity);
+
+        // Two services tap the same input (the symmetric pointer service and the router). The
+        // hooks must not be re-installed: a second SetWindowsHookEx with a fresh delegate while
+        // the first hooks are still active orphans the first delegate, the OS keeps calling it,
+        // and the runtime fails fast on the garbage-collected callback.
+        if (_hookThread != null)
+            return;
 
         // callbacks stored as fields to prevent GC collection while hooks are active
         _mouseHookProc = MouseHookCallback;
@@ -145,22 +158,27 @@ public sealed class WindowsInputHandler(ILogger<WindowsInputHandler> log, IHydra
 
     public void StopEventTap()
     {
+        if (_hookThread == null) return; // already stopped (idempotent: two services share the tap)
         _healthTimer?.Dispose();
         _healthTimer = null;
         if (_hookThreadId != 0)
             NativeMethods.PostThreadMessage(_hookThreadId, NativeMethods.WM_QUIT, nint.Zero, nint.Zero);
         _hookThread?.Join(TimeSpan.FromSeconds(2));
+        _hookThread = null;
     }
 
     public bool AnyMouseButtonHeld()
     {
         // VK_LBUTTON=0x01, VK_RBUTTON=0x02, VK_MBUTTON=0x04, VK_XBUTTON1=0x05, VK_XBUTTON2=0x06
-        // high bit (0x8000) set means the key is currently down
-        return (NativeMethods.GetKeyState(0x01) & 0x8000) != 0
-            || (NativeMethods.GetKeyState(0x02) & 0x8000) != 0
-            || (NativeMethods.GetKeyState(0x04) & 0x8000) != 0
-            || (NativeMethods.GetKeyState(0x05) & 0x8000) != 0
-            || (NativeMethods.GetKeyState(0x06) & 0x8000) != 0;
+        // high bit (0x8000) set means the key is currently down.
+        // GetAsyncKeyState, not GetKeyState: this is asked from the router's consumer thread,
+        // which never retrieves input messages, so GetKeyState would answer with a stale state —
+        // and a drag would cross to the other computer, button still down, mid-gesture.
+        return (NativeMethods.GetAsyncKeyState(0x01) & 0x8000) != 0
+            || (NativeMethods.GetAsyncKeyState(0x02) & 0x8000) != 0
+            || (NativeMethods.GetAsyncKeyState(0x04) & 0x8000) != 0
+            || (NativeMethods.GetAsyncKeyState(0x05) & 0x8000) != 0
+            || (NativeMethods.GetAsyncKeyState(0x06) & 0x8000) != 0;
     }
 
     public ValueTask DisposeAsync() { StopEventTap(); return ValueTask.CompletedTask; }
@@ -182,7 +200,7 @@ public sealed class WindowsInputHandler(ILogger<WindowsInputHandler> log, IHydra
 
         // emit key-up events for any held keys so the slave doesn't get stuck
         foreach (var keyUp in _keyResolver.TakeHeldKeyUps())
-            _onKeyEvent?.Invoke(keyUp);
+            foreach (var h in _onKeyEvent) h(keyUp);
 
         // clear stale key state — modifier bits from the old desktop bleed into new events otherwise
         _keyResolver.Reset();
@@ -207,7 +225,7 @@ public sealed class WindowsInputHandler(ILogger<WindowsInputHandler> log, IHydra
                 if (info.pt.x == _lastWarpX && info.pt.y == _lastWarpY)
                     return IsOnVirtualScreen ? 1 : NativeMethods.CallNextHookEx(nint.Zero, nCode, wParam, lParam);
                 var wasOnVirtualScreen = IsOnVirtualScreen;
-                _onMouseMove?.Invoke(info.pt.x, info.pt.y);
+                foreach (var h in _onMouseMove) h(info.pt.x, info.pt.y);
                 // swallow the event that triggered a virtual→real transition: _onMouseMove warped to the
                 // entry edge, and passing this event through would move the cursor back (overriding the warp)
                 if (wasOnVirtualScreen && !IsOnVirtualScreen) return 1;
@@ -224,7 +242,7 @@ public sealed class WindowsInputHandler(ILogger<WindowsInputHandler> log, IHydra
                     : msg is NativeMethods.WM_RBUTTONDOWN or NativeMethods.WM_RBUTTONUP ? MouseButton.Right
                     : msg is NativeMethods.WM_MBUTTONDOWN or NativeMethods.WM_MBUTTONUP ? MouseButton.Middle
                     : MouseButton.Left;
-                _onMouseButton?.Invoke(new MouseButtonEvent(button, isDown));
+                foreach (var h in _onMouseButton) h(new MouseButtonEvent(button, isDown));
             }
             else if (msg is NativeMethods.WM_MOUSEWHEEL or NativeMethods.WM_MOUSEHWHEEL)
             {
@@ -232,7 +250,7 @@ public sealed class WindowsInputHandler(ILogger<WindowsInputHandler> log, IHydra
                 var scroll = msg == NativeMethods.WM_MOUSEWHEEL
                     ? new MouseScrollEvent(0, delta)
                     : new MouseScrollEvent(delta, 0);
-                _onMouseScroll?.Invoke(scroll);
+                foreach (var h in _onMouseScroll) h(scroll);
             }
         }
 
@@ -250,7 +268,7 @@ public sealed class WindowsInputHandler(ILogger<WindowsInputHandler> log, IHydra
             var keyEvents = _keyResolver.Resolve((int)wParam, info);
             if (keyEvents is not null)
                 foreach (var keyEvent in keyEvents)
-                    _onKeyEvent?.Invoke(keyEvent);
+                    foreach (var h in _onKeyEvent) h(keyEvent);
             if (IsOnVirtualScreen) return 1; // swallow — don't call CallNextHookEx
         }
         return NativeMethods.CallNextHookEx(nint.Zero, nCode, wParam, lParam);

@@ -6,11 +6,32 @@ namespace Tests.Desk;
 
 public class DeskArrangementTests
 {
-    private static DeskMonitorConfig Monitor(string id, string host, int x, int y, int w = 1920, int h = 1080) => new()
+    private static DeskMonitorConfig Monitor(string id, string host, int x, int y, int w = 1920, int h = 1080,
+        bool sleeping = false) => new()
     {
-        Id = id, Label = id, DeskX = x, DeskY = y, Width = w, Height = h,
+        Id = id, Label = id, DeskX = x, DeskY = y, Width = w, Height = h, Sleeping = sleeping,
         Sources = [new MonitorSourceConfig { Host = host, Input = 15, DdcId = id, ScreenId = $"{host}:screen" }],
     };
+
+    [Test]
+    public void ASleepingMonitorIsNotACrossingDestination()
+    {
+        // The panel is black. A crossing onto it puts the cursor on a display nobody can see, and
+        // the only way back is to guess — so a blanked monitor is left out of the arrangement
+        // entirely rather than being an edge that swallows the pointer.
+        var monitors = new List<DeskMonitorConfig>
+        {
+            Monitor("left", "mac", 0, 0),
+            Monitor("right", "pc", 1920, 0, sleeping: true),
+        };
+        var placed = DeskArrangement.Place(monitors, id => id == "left" ? "mac" : "pc");
+
+        var hosts = DeskArrangement.BuildHosts(placed, ["mac", "pc"]);
+
+        Assert.That(hosts.Single(h => h.Name == "mac").Neighbours, Is.Empty,
+            "a blanked monitor is not a way to the other computer");
+        Assert.That(hosts.Single(h => h.Name == "pc").Neighbours, Is.Empty);
+    }
 
     [Test]
     public void TwoTouchingMonitorsOnDifferentComputersBecomeACrossingBothWays()
