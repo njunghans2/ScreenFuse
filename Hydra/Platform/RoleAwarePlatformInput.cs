@@ -21,17 +21,23 @@ namespace Hydra.Platform;
 internal sealed class RoleAwarePlatformInput(IHydraProfile profile, IPlatformInput handler, ICursor cursor)
     : IPlatformInput
 {
-    // Which half hid the cursor, while it is hidden.
-    //
-    // Handing the keyboard over mid-crossing used to leave the cursor invisible. The controller
-    // hides it through the input handler — on Windows that is the shield, and the system cursors
-    // swapped out from under it — and the show that undoes it arrived after the role had already
-    // changed, so it was addressed to the output handler, which had never hidden anything and had
-    // nothing to give back. Hiding is remembered, and the matching show goes back to the same half
-    // however long it takes and whatever the role is by then.
-    private ICursor? _hiddenBy;
+    private ICursor Steering => profile.IsController ? handler : cursor;
 
-    private ICursor Steering => _hiddenBy ?? (profile.IsController ? handler : cursor);
+    // Which half hid the cursor, while it is hidden — and nothing else.
+    //
+    // Hiding and showing must pair up across a role change: handing the keyboard over mid-crossing
+    // left the cursor invisible because the controller hides it through the input handler (on
+    // Windows the shield, with the system cursors swapped out from under it) and the show that
+    // undoes it arrived after the role had flipped, addressed to an output handler that had hidden
+    // nothing and had nothing to give back.
+    //
+    // Steering is deliberately not sticky. Making it so broke the other direction: a computer that
+    // is following hides its cursor whenever no pointer is standing on it, so by the time it took
+    // control every warp and every cursor read was still pinned to the output handler — and the
+    // controller's pointer is parked and measured through the input handler. It crossed onto the
+    // other computer and drifted straight back off. Where the cursor is steered follows the role;
+    // only the show follows the hide.
+    private ICursor? _hiddenBy;
 
     public bool IsOnVirtualScreen
     {
@@ -48,7 +54,7 @@ internal sealed class RoleAwarePlatformInput(IHydraProfile profile, IPlatformInp
 
     public ValueTask ShowCursor()
     {
-        var side = Steering;
+        var side = _hiddenBy ?? Steering;
         _hiddenBy = null;
         return side.ShowCursor();
     }
