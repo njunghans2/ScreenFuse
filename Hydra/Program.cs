@@ -387,7 +387,8 @@ if (config != null)
         services.AddSingleton<IPlatformInput>(sp => new RoleAwarePlatformInput(
             sp.GetRequiredService<IHydraProfile>(),
             sp.GetRequiredService<MacInputHandler>(),
-            sp.GetRequiredService<ICursor>()));
+            sp.GetRequiredService<ICursor>(),
+            sp.GetRequiredService<ILogger<RoleAwarePlatformInput>>()));
     }
     else if (OperatingSystem.IsWindows())
     {
@@ -406,7 +407,8 @@ if (config != null)
         services.AddSingleton<IPlatformInput>(sp => new RoleAwarePlatformInput(
             sp.GetRequiredService<IHydraProfile>(),
             sp.GetRequiredService<WindowsInputHandler>(),
-            sp.GetRequiredService<ICursor>()));
+            sp.GetRequiredService<ICursor>(),
+            sp.GetRequiredService<ILogger<RoleAwarePlatformInput>>()));
     }
     else if (linuxConsoleMode)
     {
@@ -429,7 +431,8 @@ if (config != null)
         services.AddSingleton<IPlatformInput>(sp => new RoleAwarePlatformInput(
             sp.GetRequiredService<IHydraProfile>(),
             sp.GetRequiredService<XorgInputHandler>(),
-            sp.GetRequiredService<ICursor>()));
+            sp.GetRequiredService<ICursor>(),
+            sp.GetRequiredService<ILogger<RoleAwarePlatformInput>>()));
     }
     else
         throw new PlatformNotSupportedException($"Unsupported OS: {Environment.OSVersion}");

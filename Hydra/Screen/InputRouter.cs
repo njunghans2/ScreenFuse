@@ -571,6 +571,13 @@ public class InputRouter(
 
     private void OnScreensaverDeactivated()
     {
+        // Guarded like its counterpart above, which it was not. The screensaver going off ends in
+        // "re-enter the screen we were on", and that means swallowing this computer's keyboard on
+        // the promise of forwarding it — a promise only the controller keeps. Handing the keyboard
+        // over no longer restarts anything, so a computer can be the controller when its screensaver
+        // comes on and a follower by the time it goes off, with ScreensaverActive still set from
+        // when it was one.
+        if (!Routing) return;
         _ = _commands.Writer.TryWrite(async st =>
         {
             if (!st.ScreensaverActive) return;
