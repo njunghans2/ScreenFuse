@@ -14,6 +14,7 @@ using Hydra.Platform;
 using Hydra.Scenes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace Hydra.Tray;
 
@@ -24,6 +25,7 @@ internal sealed class TrayApplication : Application
     private static bool _setupOnly;
     private static bool _onboarding;
     private static string? _initialStatus;
+    private static ILogger? _log;
     private TrayIcon? _tray;
     private SettingsWindow? _settings;
     private OnboardingWindow? _onboardingWindow;
@@ -39,6 +41,8 @@ internal sealed class TrayApplication : Application
         _setupOnly = setupOnly;
         _onboarding = onboarding;
         _initialStatus = initialStatus;
+        _log = services?.GetService<ILoggerFactory>()?.CreateLogger("Tray");
+        Note($"starting on thread {Environment.CurrentManagedThreadId}");
 
         // Fail with the reason rather than with Avalonia's version of it. Initialising the UI off
         // the main thread throws "IDispatcherImpl belongs to a different thread", which says nothing
@@ -49,6 +53,18 @@ internal sealed class TrayApplication : Application
                 $"instead of {RunMode.MainThreadId}. Something awaited before the tray started; use RunSync in Program.cs instead.");
 
         Build().StartWithClassicDesktopLifetime([], ShutdownMode.OnExplicitShutdown);
+        Note("the tray has stopped");
+    }
+
+    // The tray icon is the entire user interface on macOS — no Dock icon, no window, nothing else to
+    // look at. When it fails to appear there is by definition nothing on screen to say why, so each
+    // step towards it is written to the agent log as well: an empty menu bar then reads as a line
+    // that never arrived or an exception that did, rather than as silence.
+    private static void Note(string message)
+    {
+        _log?.LogInformation("{Message}", message);
+        try { Console.Error.WriteLine($"[screenfuse] tray: {message}"); }
+        catch (IOException) { /* no console attached */ }
     }
 
     internal static void RequestShutdown() => Dispatcher.UIThread.Post(() =>
@@ -70,7 +86,22 @@ internal sealed class TrayApplication : Application
 
     public override void OnFrameworkInitializationCompleted()
     {
-        if (ApplicationLifetime is not IClassicDesktopStyleApplicationLifetime desktop) return;
+        if (ApplicationLifetime is not IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            Note("no desktop lifetime — there is nothing to put an icon in");
+            return;
+        }
+
+        // Throwing out of here kills the process, and launchd starts one that dies the same way; the
+        // only sign of the loop is a menu bar that stays empty. Report it and stay up instead — the
+        // agent still routes input, and `screenfuse --setup` still opens the settings.
+        try { BuildTray(desktop); }
+        catch (Exception ex) { Note($"could not create the menu bar icon: {ex}"); }
+        base.OnFrameworkInitializationCompleted();
+    }
+
+    private void BuildTray(IClassicDesktopStyleApplicationLifetime desktop)
+    {
         desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
         var menu = new NativeMenu();
@@ -179,12 +210,12 @@ internal sealed class TrayApplication : Application
         // the obvious way in, and hunting through a menu for it is not.
         _tray.Clicked += (_, _) => ShowSettings();
         TrayIcon.SetIcons(this, new TrayIcons { _tray });
+        Note($"menu bar icon created (visible={_tray.IsVisible})");
         if (_setupOnly)
         {
             if (_onboarding) ShowOnboarding();
             else ShowSettings(_initialStatus);
         }
-        base.OnFrameworkInitializationCompleted();
     }
 
     // The desk only settles once the peers report in, so the list is rebuilt when it actually
