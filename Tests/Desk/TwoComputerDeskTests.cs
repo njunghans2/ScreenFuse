@@ -828,7 +828,7 @@ public class TwoComputerDeskTests
                     monitors[i] = monitors[i] with { CurrentInput = input };
             return Task.FromResult(new DisplayCommandResult($"set {id} input {input}", true));
         }
-        public Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default)
+        public Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, bool force = false, CancellationToken cancellationToken = default)
         {
             Commands.Add(wake ? "wake" : "sleep");
             return Task.FromResult(new DisplayCommandResult("power", true));

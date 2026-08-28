@@ -31,7 +31,13 @@ public interface IDisplayRouter
     // follows the signal, which hands it over without any DDC involvement — the escape hatch for
     // computers with no DDC helper and monitors that ignore VCP 0x60. It is all of this computer's
     // displays or none, so it cannot hand over one monitor of several.
-    Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default);
+    //
+    // force is the user asking outright, rather than a switch waking what it is about to need. A
+    // wake during a switch reconnects a display macOS dropped only on a computer left with nothing
+    // to render on, because taking back every released display would claim monitors this computer
+    // had been handed off. Asked for by hand, taking them all back is exactly the request — and
+    // without it the rescue is silently a no-op on every laptop, which always has its own panel.
+    Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, bool force = false, CancellationToken cancellationToken = default);
 
     // Removes this computer's display for one monitor from (or restores it to) the desktop
     // topology, so a display that switched to another computer stops being part of this one's

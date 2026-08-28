@@ -20,7 +20,7 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
             var results = new List<DisplayCommandResult>();
 
             if (routing.WakeDisplays)
-                results.Add(await SetDisplayPowerCoreAsync(wake: true, cancellationToken));
+                results.Add(await SetDisplayPowerCoreAsync(wake: true, force: false, cancellationToken));
 
             foreach (var input in routing.Inputs)
             {
@@ -36,7 +36,7 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
                 await Task.Delay(routing.SettleDelayMs, cancellationToken);
 
             if (routing.SleepDisplays)
-                results.Add(await SetDisplayPowerCoreAsync(wake: false, cancellationToken));
+                results.Add(await SetDisplayPowerCoreAsync(wake: false, force: false, cancellationToken));
 
             return results;
         }
@@ -303,19 +303,19 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
         finally { _gate.Release(); }
     }
 
-    public async Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, CancellationToken cancellationToken = default)
+    public async Task<DisplayCommandResult> SetDisplayPowerAsync(bool wake, bool force = false, CancellationToken cancellationToken = default)
     {
         // The macOS wake — reconnecting displays the window server dropped — shares no state with
         // the DDC paths, so it must not wait behind the gate: a slow m1ddc inventory would starve
         // it, the monitor's auto-hunt would win the race, and the switch would revert.
         if (OperatingSystem.IsMacOS() && wake)
-            return await SetDisplayPowerCoreAsync(wake, cancellationToken);
+            return await SetDisplayPowerCoreAsync(wake, force, cancellationToken);
         await _gate.WaitAsync(cancellationToken);
-        try { return await SetDisplayPowerCoreAsync(wake, cancellationToken); }
+        try { return await SetDisplayPowerCoreAsync(wake, force, cancellationToken); }
         finally { _gate.Release(); }
     }
 
-    private static async Task<DisplayCommandResult> SetDisplayPowerCoreAsync(bool wake, CancellationToken cancellationToken)
+    private static async Task<DisplayCommandResult> SetDisplayPowerCoreAsync(bool wake, bool force, CancellationToken cancellationToken)
     {
         if (OperatingSystem.IsWindows())
         {
@@ -343,14 +343,19 @@ public sealed class DisplayRouter(ILogger<DisplayRouter> log) : IDisplayRouter
             // macOS's display arrangement — `caffeinate` cannot bring it back, only re-enabling it
             // via CGSConfigureDisplayEnabled can. Do that first, then wake the system.
             //
-            // But only as a rescue, for a computer left with nothing to render on. This reconnects
-            // *every* display macOS ever dropped, which on a computer that still has one is not a
-            // wake but a land grab: switching one monitor here quietly took back every other
-            // monitor this computer had been released from, both computers then listed the same
-            // panel as their screen, and the desk handed it to whichever of them sorted first.
+            // During a switch, only as a rescue for a computer left with nothing to render on. This
+            // reconnects *every* display macOS ever dropped, which on a computer that still has one
+            // is not a wake but a land grab: switching one monitor here quietly took back every
+            // other monitor this computer had been released from, both computers then listed the
+            // same panel as their screen, and the desk handed it to whichever of them sorted first.
             // The display for the monitor actually being switched is reconnected by name, by the
             // desk, before the input moves — this does not have to guess at it.
-            var reconnected = MacDisplayWake.HasActiveDisplay() ? 0 : MacDisplayWake.WakeDisconnected();
+            //
+            // Asked for by hand it is the opposite: taking every dropped display back is the whole
+            // request. Guarding that too made the rescue a no-op on every laptop, which always has
+            // its own panel — so the one machine most likely to have lost its monitors was the one
+            // machine that could not get them back.
+            var reconnected = force || !MacDisplayWake.HasActiveDisplay() ? MacDisplayWake.WakeDisconnected() : 0;
             var caffeinated = await RunAsync("caffeinate", ["-u", "-t", "1"], "wake displays", cancellationToken);
             return reconnected > 0
                 ? new DisplayCommandResult("reconnect displays", true, $"Reconnected {reconnected} display(s) macOS had dropped.")

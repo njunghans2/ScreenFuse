@@ -512,7 +512,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         {
             var targets = new List<string> { LocalName };
             targets.AddRange(_peers.Where(p => !p.Equals(LocalName, StringComparison.OrdinalIgnoreCase)));
-            await Task.WhenAll(targets.Select(t => WakeForSwitchAsync(t, cancellationToken)).ToArray());
+            await Task.WhenAll(targets.Select(t => WakeForSwitchAsync(t, force: true, cancellationToken)).ToArray());
             return DeskActionResult.Ok($"Woke the displays on {string.Join(", ", targets)}.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -563,7 +563,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         DeskActionResult result;
         if (bySignal)
         {
-            await WakeForSwitchAsync(host, cancel);
+            await WakeForSwitchAsync(host, force: false, cancel);
             await PrepareGainingDisplayAsync(monitor, host, cancel);
             await ReleaseLosingDisplaysAsync(monitor, host, cancel);
             result = DeskActionResult.Ok($"{monitor.DisplayName()} switched to {host}.");
@@ -577,7 +577,7 @@ public sealed class DeskService : SimpleHostedService, IDeskService
             // black and undoes itself a few seconds later. The same switch works perfectly when that
             // computer happens to be awake, which is exactly what makes it look intermittent rather
             // than like the missing step it is.
-            await WakeForSwitchAsync(host, cancel);
+            await WakeForSwitchAsync(host, force: false, cancel);
 
             // …and put its display for *this* monitor back on its desktop before the input moves,
             // not after. Waking a computer is not the same as it driving the panel: a display that
@@ -775,7 +775,7 @@ var rebuilt = RebuildHosts(_config);
                     var released = await _router.SetMonitorDisplayEnabledAsync(source.DdcId, enabled: false, cancel);
                     if (!released.Success)
                     {
-                        var slept = await _router.SetDisplayPowerAsync(wake: false, cancel);
+                        var slept = await _router.SetDisplayPowerAsync(wake: false, cancellationToken: cancel);
                         _log.LogInformation("Last display for {Host}: {DdcId} would not be released ({Detail}), so the output was stopped instead ({Slept})",
                             LocalName, source.DdcId, released.Detail, slept.Success);
                     }
@@ -846,13 +846,13 @@ var rebuilt = RebuildHosts(_config);
     //
     // Best effort on purpose: a computer that cannot be reached, or is too old to understand the
     // request, must not stop the switch. It only ever made things worse to refuse.
-    private async Task WakeForSwitchAsync(string host, CancellationToken cancel)
+    private async Task WakeForSwitchAsync(string host, bool force, CancellationToken cancel)
     {
         try
         {
             if (host.Equals(LocalName, StringComparison.OrdinalIgnoreCase))
             {
-                await _router.SetDisplayPowerAsync(wake: true, cancel);
+                await _router.SetDisplayPowerAsync(wake: true, force, cancel);
             }
             else
             {
@@ -860,7 +860,7 @@ var rebuilt = RebuildHosts(_config);
                 // busy peer (a machine re-enumerating its displays can take a while to answer).
                 // The settle below gives the request time to land before the monitor is switched.
                 Send([host], MessageSerializer.Encode(MessageKind.DeskDisplayPower,
-                    new DeskDisplayPowerMessage(Guid.NewGuid().ToString("N"), Wake: true)));
+                    new DeskDisplayPowerMessage(Guid.NewGuid().ToString("N"), Wake: true, Force: force)));
             }
 
             // Output does not come back the instant it is asked for. Switching into a signal that is
@@ -962,7 +962,7 @@ var rebuilt = RebuildHosts(_config);
             // Reconnect the target's displays — the monitor's input change makes its hot-plug line
             // drop for a moment, and macOS reads that as an unplug. The drop can lag the switch, so
             // keep re-asking until the monitor actually reports the candidate input.
-            await WakeForSwitchAsync(target, cancel);
+            await WakeForSwitchAsync(target, force: false, cancel);
             await PrepareGainingDisplayAsync(monitor, target, cancel);
             var inventory = await RequestInventoryAsync(owner, cancel);
             if (CurrentInputOf(inventory, monitor) == candidate) return true;
@@ -996,7 +996,7 @@ var rebuilt = RebuildHosts(_config);
             // drop for a moment, and macOS reads that as an unplug and removes the display. The
             // drop can lag the switch, so keep re-asking until the display is back in the
             // arrangement (the display server polls its screens every couple of seconds).
-            await WakeForSwitchAsync(host, cancel);
+            await WakeForSwitchAsync(host, force: false, cancel);
             await PrepareGainingDisplayAsync(monitor, host, cancel);
             var inventory = await RequestInventoryAsync(host, cancel);
             if (inventory != null && ReportsScreen(inventory, monitor)) return true;
@@ -1027,7 +1027,7 @@ var rebuilt = RebuildHosts(_config);
         int? lastHonest = null;
         for (var attempt = 0; attempt < 8; attempt++)
         {
-            await WakeForSwitchAsync(target, cancel);
+            await WakeForSwitchAsync(target, force: false, cancel);
             await PrepareGainingDisplayAsync(monitor, target, cancel);
             await Task.Delay(300, cancel);
             var inventory = await RequestInventoryAsync(owner, cancel);
@@ -1469,7 +1469,7 @@ var rebuilt = RebuildHosts(_config);
             {
                 var request = new DecodedMessage(kind, body).Deserialize<DeskDisplayPowerMessage>();
                 _log.LogInformation("Display power request from {Host}: wake={Wake}", sourceHost, request.Wake);
-                var result = await _router.SetDisplayPowerAsync(request.Wake);
+                var result = await _router.SetDisplayPowerAsync(request.Wake, request.Force);
                 _log.LogInformation("Display power {Action} on this computer: {Success} {Detail}",
                     request.Wake ? "wake" : "sleep", result.Success, result.Detail);
                 Send([sourceHost], MessageSerializer.Encode(MessageKind.DeskSetInputResult,

@@ -122,7 +122,10 @@ public record DeskScreenReport(
     string? PlatformId = null);
 public record DeskInventoryMessage(List<DeskMonitorReport> Monitors, List<DeskScreenReport> Screens);
 public record DeskSetInputMessage(string RequestId, string DdcId, int Input);
-public record DeskDisplayPowerMessage(string RequestId, bool Wake);
+// Force says the user asked for this outright rather than a switch waking what it needs next; it
+// decides whether a peer reconnects every display macOS dropped or only rescues itself when it has
+// nothing left to render on. Defaulted, so a peer on an older build still reads the message.
+public record DeskDisplayPowerMessage(string RequestId, bool Wake, bool Force = false);
 public record DeskInventoryRequestMessage;
 public record DeskConfigRequestMessage;
 public record CursorPositionMessage(string Screen, int X, int Y);
