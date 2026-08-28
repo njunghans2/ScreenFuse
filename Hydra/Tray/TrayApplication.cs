@@ -297,6 +297,17 @@ internal sealed class TrayApplication : Application
             return;
         }
 
+        // On macOS the next run has to come from launchd, not from here — a process started by this
+        // one lives outside the launch agent's job and is never given a menu bar icon. See
+        // AgentCommands.Kickstart. Nothing is holding the lock at this point: a setup run returns
+        // before it is taken, so the replacement can start while this window is still closing.
+        if (OperatingSystem.IsMacOS() && Platform.MacOs.AgentCommands.Kickstart())
+        {
+            Note("handed the next run to launchd");
+            (ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Shutdown();
+            return;
+        }
+
         var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Cannot determine executable path.");
         Process.Start(new ProcessStartInfo(executable) { UseShellExecute = false });
         (ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Shutdown();

@@ -52,9 +52,56 @@ internal static partial class AgentCommands
 
         File.WriteAllText(plistPath, GeneratePlist(exePath, workingDir, logDir), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
+        EndStrayInstances();
         foreach (var command in BootstrapSequence(DomainTarget(), Label, plistPath))
             RunLaunchctl(command, tolerateFailure: !command.StartsWith("bootstrap", StringComparison.Ordinal));
         Console.WriteLine("ScreenFuse agent installed and started.");
+    }
+
+    // Hands the next run to launchd rather than starting it here, and says whether it could.
+    //
+    // A process ScreenFuse starts for itself is not part of the launch agent's job: its parent exits,
+    // it is reparented to pid 1, and it keeps running with no job around it. macOS backs an
+    // NSStatusItem with a scene handed out per job, so that stray never gets one — it routes input
+    // and crosses screens perfectly and has no menu bar icon at all, which is the one failure with
+    // nothing on screen to report it. It also takes the process lock, so every later start by
+    // launchd exits with "another instance is already running" and the icon never comes back.
+    internal static bool Kickstart()
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!File.Exists(Path.Combine(home, "Library", "LaunchAgents", PlistFileName))) return false;
+
+        try
+        {
+            EndStrayInstances();
+            RunLaunchctl($"kickstart -k {DomainTarget()}/{Label}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Could not ask launchd to start ScreenFuse: {ex.Message}");
+            return false;
+        }
+    }
+
+    // Ends every ScreenFuse but this one, whatever started them.
+    //
+    // The lock belongs to whichever instance reached it first, and launchd's is not necessarily it.
+    // Asking politely is not enough either: a stray wedged in the status item it will never be given
+    // does not act on a term signal, so it has to be ended outright.
+    internal static void EndStrayInstances()
+    {
+        foreach (var other in Process.GetProcesses())
+        {
+            try
+            {
+                if (other.Id == Environment.ProcessId) continue;
+                if (!other.ProcessName.Contains("screenfuse", StringComparison.OrdinalIgnoreCase)) continue;
+                other.Kill(entireProcessTree: true);
+                other.WaitForExit(2000);
+            }
+            catch (Exception) { /* already gone, or not ours to end */ }
+        }
     }
 
     // The order launchd needs, in one place, because getting it wrong fails obscurely.
