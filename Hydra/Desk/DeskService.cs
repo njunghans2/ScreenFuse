@@ -535,6 +535,54 @@ public sealed class DeskService : SimpleHostedService, IDeskService
         return Task.FromResult(DeskActionResult.Ok("Cursor reset requested on the connected computers."));
     }
 
+    // Troubleshooting: state the desk's own answer again, to every computer.
+    //
+    // The desk records which computer each monitor is on; the computers do not always still agree.
+    // Reconnecting displays by hand leaves panels lit on a machine the desk gave them away from,
+    // and a switch that only half landed leaves two computers both rendering to one monitor. Either
+    // way windows and the pointer go on living on a screen nobody is looking at, and nothing in the
+    // desk is wrong — only the machines are, so re-deciding anything would be the wrong repair.
+    //
+    // Deliberately no DDC: the monitors keep showing whatever they show. This settles which
+    // computers are driving them, which is the half that has drifted; asking for the inputs to move
+    // as well is what the monitor list is for, and doing both here would switch panels out from
+    // under someone who only wanted the stray displays cleaned up.
+    public async Task<DeskActionResult> EnforceLayoutAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var applied = new List<string>();
+            foreach (var view in _snapshot.Monitors)
+            {
+                if (string.IsNullOrWhiteSpace(view.ActiveHost)) continue;
+                if (_config.Monitor(view.Id) is not { } monitor) continue;
+
+                // Gaining before losing, the same order a switch uses: a computer that is meant to
+                // keep a monitor must have its display back before the others put theirs down, or
+                // there is a window in which nothing is driving the panel at all.
+                await PrepareGainingDisplayAsync(monitor, view.ActiveHost, cancellationToken);
+                await ReleaseLosingDisplaysAsync(monitor, view.ActiveHost, cancellationToken, byScreenWhenNoDdc: true);
+                applied.Add($"{monitor.DisplayName()} on {view.ActiveHost}");
+            }
+
+            if (applied.Count == 0)
+                return DeskActionResult.Fail(
+                    "The desk does not know which computer any monitor is on yet, so there is nothing to enforce.");
+
+            _log.LogInformation("Enforced the desk layout: {Applied}", string.Join("; ", applied));
+            return DeskActionResult.Ok($"Put the displays back the way the desk has them — {string.Join(", ", applied)}.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return DeskActionResult.Fail("Cancelled.");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Could not enforce the desk layout");
+            return DeskActionResult.Fail($"Could not put the displays back: {ex.Message}");
+        }
+    }
+
     // -- controller-side implementations ---------------------------------------------------------
 
     private async Task<DeskActionResult> SetMonitorHostCoreAsync(string monitorId, string host, CancellationToken cancel)
@@ -736,12 +784,23 @@ var rebuilt = RebuildHosts(_config);
         }
     }
 
-    private async Task ReleaseLosingDisplaysAsync(DeskMonitorConfig monitor, string gainingHost, CancellationToken cancel)
+    private async Task ReleaseLosingDisplaysAsync(
+        DeskMonitorConfig monitor, string gainingHost, CancellationToken cancel, bool byScreenWhenNoDdc = false)
     {
         foreach (var source in monitor.Sources)
         {
             if (source.Host.Equals(gainingHost, StringComparison.OrdinalIgnoreCase)) continue;
-            if (string.IsNullOrWhiteSpace(source.DdcId)) continue;
+
+            // A switch only touches monitors it can address over DDC, because the release is one
+            // half of moving an input and there is no point doing half of it. Enforcing the layout
+            // is not a switch: the stray display to be put down is often one this computer has no
+            // DDC for at all -- a helper that is missing, or a panel the monitor answers nothing
+            // about -- and taking a display off the desktop needs only the screen's own identity,
+            // which is what SetMonitorDisplayEnabledAsync asks for in the first place.
+            var displayId = string.IsNullOrWhiteSpace(source.DdcId) && byScreenWhenNoDdc
+                ? source.ScreenId
+                : source.DdcId;
+            if (string.IsNullOrWhiteSpace(displayId)) continue;
 
             // Only the monitor that changed hands is released. A computer keeping a display that
             // cannot be switched — a laptop panel wired to nothing else — used to have it blanked
@@ -772,22 +831,22 @@ var rebuilt = RebuildHosts(_config);
                     // refuses to remove a computer's last active display, and stopping the output
                     // is the whole of what can be done there. macOS accepts it, which is what the
                     // desk wants — and the wake on the way back reconnects it.
-                    var released = await _router.SetMonitorDisplayEnabledAsync(source.DdcId, enabled: false, cancel);
+                    var released = await _router.SetMonitorDisplayEnabledAsync(displayId, enabled: false, cancel);
                     if (!released.Success)
                     {
                         var slept = await _router.SetDisplayPowerAsync(wake: false, cancellationToken: cancel);
                         _log.LogInformation("Last display for {Host}: {DdcId} would not be released ({Detail}), so the output was stopped instead ({Slept})",
-                            LocalName, source.DdcId, released.Detail, slept.Success);
+                            LocalName, displayId, released.Detail, slept.Success);
                     }
                     else
                         _log.LogInformation("Last display for {Host}: released {DdcId} — {Detail}",
-                            LocalName, source.DdcId, released.Detail);
+                            LocalName, displayId, released.Detail);
                 }
                 else
                 {
-                    var disabled = await _router.SetMonitorDisplayEnabledAsync(source.DdcId, enabled: false, cancel);
+                    var disabled = await _router.SetMonitorDisplayEnabledAsync(displayId, enabled: false, cancel);
                     _log.LogInformation("Disabled local display {DdcId} for {Monitor}: {Success} {Detail}",
-                        source.DdcId, monitor.DisplayName(), disabled.Success, disabled.Detail);
+                        displayId, monitor.DisplayName(), disabled.Success, disabled.Detail);
                 }
             }
             else if (_peers.Contains(source.Host, StringComparer.OrdinalIgnoreCase))
@@ -799,17 +858,17 @@ var rebuilt = RebuildHosts(_config);
                     // output stop is what is left for that computer. On one that released the
                     // display there is nothing left to stop, so it costs nothing either.
                     Send([source.Host], MessageSerializer.Encode(MessageKind.SetMonitorDisplay,
-                        new SetMonitorDisplayMessage(source.DdcId, Enabled: false)));
+                        new SetMonitorDisplayMessage(displayId, Enabled: false)));
                     Send([source.Host], MessageSerializer.Encode(MessageKind.DeskDisplayPower,
                         new DeskDisplayPowerMessage(Guid.NewGuid().ToString("N"), Wake: false)));
-                    _log.LogInformation("Asked {Host} to release {DdcId} and stop its output — it was its last display", source.Host, source.DdcId);
+                    _log.LogInformation("Asked {Host} to release {DdcId} and stop its output — it was its last display", source.Host, displayId);
                 }
                 else
                 {
                     Send([source.Host], MessageSerializer.Encode(MessageKind.SetMonitorDisplay,
-                        new SetMonitorDisplayMessage(source.DdcId, Enabled: false)));
+                        new SetMonitorDisplayMessage(displayId, Enabled: false)));
                     _log.LogInformation("Asked {Host} to disable its display {DdcId} for {Monitor}",
-                        source.Host, source.DdcId, monitor.DisplayName());
+                        source.Host, displayId, monitor.DisplayName());
                 }
             }
             else continue;

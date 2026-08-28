@@ -185,6 +185,8 @@ internal sealed class SettingsWindow : Window
         {
             Section("Force connect all displays", "Wakes every display on this computer and on the connected computers, so monitors that drifted to sleep or lost their signal can re-lock onto the right computer."),
             new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Action("Force connect all displays", ForceDisplaysAsync) } },
+            Section("Enforce the current layout", "Puts every computer's displays back the way the desk has them, without switching any monitor's input. Use this when a computer is still driving a monitor that the desk shows on another one — stray windows and a pointer that walks onto a screen nobody is looking at."),
+            new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Action("Enforce the current layout", EnforceLayoutAsync) } },
             Section("Reset cursors", "Restores the cursor on this computer and on every connected computer. Use this when a pointer is stranded and its cursor stays hidden."),
             new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { Action("Reset cursors on all peers", ResetCursorsAsync) } },
             Section("Diagnostics", "Reports what this computer can read over DDC/CI — which monitors answer, and which input each is showing."),
@@ -247,6 +249,24 @@ internal sealed class SettingsWindow : Window
         {
             SetStatus($"Could not change the startup entry: {ex.Message}");
             RefreshStartupToggle();
+        }
+    }
+
+    private async Task EnforceLayoutAsync()
+    {
+        if (_desk == null)
+        {
+            SetStatus("ScreenFuse is not running the desk right now — there is no layout to enforce.");
+            return;
+        }
+        try
+        {
+            var result = await _desk.EnforceLayoutAsync();
+            SetStatus(result.Message);
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Could not put the displays back: {ex.Message}");
         }
     }
 

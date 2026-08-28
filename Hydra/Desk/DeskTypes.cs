@@ -85,6 +85,10 @@ public interface IDeskService
     // machine with a hidden cursor and no way back).
     Task<DeskActionResult> ResetCursorsAsync(CancellationToken cancellationToken = default);
 
+    // Troubleshooting: put every computer's displays back the way the desk has them, for the case
+    // where a computer is still driving a monitor the desk gave to someone else.
+    Task<DeskActionResult> EnforceLayoutAsync(CancellationToken cancellationToken = default);
+
     // Persist the arrangement the user dragged, and rebuild the crossing edges from it.
     Task<DeskActionResult> SaveArrangementAsync(IReadOnlyList<DeskPlacement> placements, CancellationToken cancellationToken = default);
 }

@@ -514,6 +514,53 @@ public class TwoComputerDeskTests
         }
     }
 
+    [Test]
+    public async Task EnforcingTheLayoutTakesBackADisplayTheDeskGaveAway()
+    {
+        // The case the button exists for: the desk says the AORUS is on Windows, and the Mac is
+        // driving it anyway. Reconnecting displays by hand leaves exactly this, and nothing in the
+        // desk is wrong -- so the repair is to restate it, not to decide anything again.
+        using var desk = await Desk.ConvergedAsync();
+        await desk.SwitchAsync(desk.Aorus, "NINOG");
+        await desk.Wire.DrainAsync();
+        desk.Mac.Router.Commands.Clear();
+        desk.Windows.Router.Commands.Clear();
+
+        var result = await desk.Windows.Service.EnforceLayoutAsync();
+        await desk.Wire.DrainAsync();
+        await desk.PumpAsync();
+
+        var owner = desk.Windows.Snapshot.Monitors.Single(m => m.Id == desk.Aorus).ActiveHost;
+        using (Assert.EnterMultipleScope())
+        {
+            Assert.That(result.Accepted, Is.True, result.Message);
+            Assert.That(owner, Is.EqualTo("NINOG"), "the desk is not re-decided, only restated");
+            Assert.That(desk.Mac.Router.Commands.Any(c => c.StartsWith("disable", StringComparison.Ordinal)),
+                Is.True, "the computer that should not be driving it puts its display down");
+        }
+    }
+
+    [Test]
+    public async Task EnforcingTheLayoutSwitchesNoInputs()
+    {
+        // Only the computers behind the monitors are settled. A monitor is left showing whatever it
+        // shows -- someone clearing up stray displays has not asked for panels to change hands, and
+        // doing both would move a screen out from under them.
+        using var desk = await Desk.ConvergedAsync();
+        await desk.SwitchAsync(desk.Aorus, "NINOG");
+        await desk.Wire.DrainAsync();
+        desk.Mac.Router.Commands.Clear();
+        desk.Windows.Router.Commands.Clear();
+
+        await desk.Windows.Service.EnforceLayoutAsync();
+        await desk.Wire.DrainAsync();
+        await desk.PumpAsync();
+
+        var inputs = desk.Windows.Router.Commands.Concat(desk.Mac.Router.Commands)
+            .Where(c => c.StartsWith("input ", StringComparison.Ordinal)).ToList();
+        Assert.That(inputs, Is.Empty, "enforcing settles the displays, never the monitors' inputs");
+    }
+
     private sealed class Desk : IDisposable
     {
         public required Node Windows { get; init; }
